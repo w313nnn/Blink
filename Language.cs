@@ -153,7 +153,43 @@ static class Language {
         problem=active.Count==0 ? "Which task should we add first?" : "Which task do you mean? Reply with its title.";
         return null;
     }
+    public static Intent ReminderListQuery(string text, DateTime localNow, List<TaskItem> tasks) {
+        string request = Words(text).Replace('’', '\'');
+        const string listRequest = @"^(?:(?:please\s+)?(?:show|list|check|view)(?:\s+me)?\s+(?:(?:all|my|the|upcoming|active|pending)\s+)*(?:reminders?|tasks?)|(?:what|which)\s+(?:reminders?|tasks?)(?:\s+(?:do i have|have i got|are scheduled|are coming up))?|what(?:'s| is| are)\s+(?:on my list|on my schedule|(?:all )?my (?:upcoming )?(?:reminders|tasks)|due)|(?:do i have\s+)?(?:any|my|upcoming)\s+reminders|reminders)(?:\s+(?:for\s+)?(?<day>today|tomorrow))?$";
+        var match = Find(request,listRequest);
+        if (!match.Success) return null;
+        string day = match.Groups["day"].Value.ToLowerInvariant();
+        string period = Find(request,@"\bdue\b").Success ? "due " + day : day;
+        return new Intent { Action="list", Reply=ListReminders(tasks,localNow,period.Trim()) };
+    }
+
+    public static string ListReminders(List<TaskItem> tasks, DateTime localNow, string period = "all") {
+        bool onlyDeadlines = period.StartsWith("due",StringComparison.Ordinal);
+        DateTime? day = null;
+        if (period.EndsWith("today",StringComparison.Ordinal)) day = localNow.Date;
+        if (period.EndsWith("tomorrow",StringComparison.Ordinal)) day = localNow.Date.AddDays(1);
+        var lines = new List<KeyValuePair<DateTime,string>>();
+        foreach (var task in tasks.Where(t => t.Stage != "done")) {
+            var times = new List<KeyValuePair<DateTime,string>>();
+            if (!onlyDeadlines && task.CheckUtc.HasValue)
+                times.Add(new KeyValuePair<DateTime,string>(task.CheckUtc.Value.ToLocalTime(),"check-in"));
+            if (task.DeadlineUtc.HasValue)
+                times.Add(new KeyValuePair<DateTime,string>(task.DeadlineUtc.Value.ToLocalTime(),"due"));
+            if (day.HasValue) times.RemoveAll(t => t.Key.Date != day.Value);
+            if (times.Count == 0 && (day.HasValue || onlyDeadlines)) continue;
+            var ordered = times.OrderBy(t => t.Key).ToList();
+            string detail = String.Join(" · ",ordered.Select(t => t.Value + " " + t.Key.ToString("ddd d MMM, h:mm tt")));
+            string line = task.Title + (task.Stage == "draft ready" ? " (draft ready)" : "");
+            if (detail.Length > 0) line += " — " + detail;
+            lines.Add(new KeyValuePair<DateTime,string>(ordered.Count == 0 ? DateTime.MaxValue : ordered[0].Key,line));
+        }
+        if (lines.Count == 0) return day.HasValue ? "You have nothing " + (onlyDeadlines ? "due " : "scheduled ") + day.Value.ToString("dddd d MMMM") + "." : onlyDeadlines ? "You have no open deadlines." : "You have no active reminders.";
+        return String.Join("\n",lines.OrderBy(line => line.Key).Select(line => "• " + line.Value));
+    }
+
     static Intent Offline(string request,DateTime now,List<TaskItem> tasks,TaskItem selected) {
+        var list = ReminderListQuery(request,now,tasks);
+        if (list != null) return list;
         if(Find(request,@"\b(?:not|never|don['’]?t|didn['’]?t|haven['’]?t|hasn['’]?t|won['’]?t|can['’]?t)\b").Success)
             return Ask("Which reminder should I set or change? You can also manage it in the task list.");
         var other=Find(request,OtherDate);

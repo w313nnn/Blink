@@ -9,17 +9,23 @@ public sealed class PetProfile {
     public const string DefaultName = "Blink";
     public static readonly string[] Personalities = { "Calm", "Playful", "Direct" };
     public static readonly string[] Appearances = { "Fern", "Ocean", "Plum" };
+    public static readonly string[] Sizes = { "Small", "Medium" };
 
     public string Name { get; set; }
     public string Character { get; set; }
     public string Personality { get; set; }
     public string Appearance { get; set; }
+    public string SizeChoice { get; set; }
+    public int PetPixels {
+        get { return SizeChoice == "Medium" ? 54 : 44; }
+    }
 
     public PetProfile() {
         Name = DefaultName;
         Character = "Curious";
         Personality = "Calm";
         Appearance = "Fern";
+        SizeChoice = "Small";
     }
     public PetProfile Copy() { return (PetProfile)MemberwiseClone(); }
 
@@ -49,19 +55,19 @@ public sealed class PetProfile {
     }
     public string Voice(string kind, string title, string time, bool submission) {
         if (kind == "test") {
-            if (Personality == "Playful") return "Peekaboo! Your ten-second test reminder is here.";
-            if (Personality == "Direct") return "Ten seconds elapsed. Your test reminder is ready.";
-            return "Here’s your ten-second test reminder.";
+            if (Personality == "Playful") return "Psst, it’s me! Can you text me back so I know this worked?";
+            if (Personality == "Direct") return "Ten seconds are up. Did you get my message?";
+            return "It’s been ten seconds. Did my message reach you?";
         }
         if (kind == "check-in") {
-            if (Personality == "Playful") return "Quick progress peek! How’s “" + title + "” coming along?";
-            if (Personality == "Direct") return "Progress check: " + title + ". Where does it stand?";
-            return "How’s “" + title + "” going?";
+            if (Personality == "Playful") return "Hey, how’s “" + title + "” coming along? Still working on it?";
+            if (Personality == "Direct") return "Checking in on “" + title + "”. How far did you get?";
+            return "How’s “" + title + "” going? I said I’d check in with you.";
         }
         string due = title + (String.IsNullOrWhiteSpace(time) ? " is due." : " is due " + time + ".");
-        if (Personality == "Direct") return due + (submission ? " Confirm when submitted." : "");
-        if (Personality == "Playful") return (kind == "warning" ? "A little heads-up! " : "Time check! ") + due + (submission ? " Did the upload go through?" : "");
-        return due + (submission ? " Have you submitted it?" : "");
+        if (Personality == "Direct") return due + (submission ? " Have you submitted it?" : " Is it done?");
+        if (Personality == "Playful") return (kind == "warning" ? "A little heads-up! " : "Time check! ") + due + (submission ? " Did the upload go through?" : " How are you getting on?");
+        return due + (submission ? " Did you manage to submit it?" : " How’s it going?");
     }
 
     static string ProfilePath(string dir) { return Path.Combine(dir,"pet-profile.json"); }
@@ -82,6 +88,7 @@ public sealed class PetProfile {
             throw new ArgumentException("Describe the character in up to 160 characters on one line.");
         if (!Personalities.Contains(Personality) || !Appearances.Contains(Appearance))
             throw new ArgumentException("Select a personality and appearance from the available choices.");
+        if (!Sizes.Contains(SizeChoice)) throw new ArgumentException("Select a pet size from the available choices.");
     }
     public void Save(string dir) {
         Validate();
@@ -89,7 +96,7 @@ public sealed class PetProfile {
         string path = ProfilePath(dir);
         string temp = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
         try {
-            var fields = new { Name, Character, Personality, Appearance };
+            var fields = new { Name, Character, Personality, Appearance, SizeChoice };
             File.WriteAllText(temp,new JavaScriptSerializer().Serialize(fields),new UTF8Encoding(false));
             if (File.Exists(path)) File.Replace(temp,path,null);
             else File.Move(temp,path);

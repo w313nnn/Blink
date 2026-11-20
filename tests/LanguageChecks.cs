@@ -46,6 +46,12 @@ class LanguageChecks {
         Check(Read("2026-12-05",null,"User: Remind me to stretch next month at 5 pm\nBlink: Which date do you mean?").CheckUtc==new DateTime(2026,12,5,17,0,0,DateTimeKind.Local).ToUniversalTime(),"unsupported date clarification");
         Check(Read("I haven't submitted the Math report",task).Action=="ask","negated completion");
         Check(Read("Don't remind me to stretch in 15 minutes").Action=="ask","negated creation");
+        Items.Add(new TaskItem {Title="Work on slides",CheckUtc=Now.AddHours(2).ToUniversalTime()});
+        Items.Add(new TaskItem {Title="Archive notes",Stage="done"});
+        var list=Read("What reminders do I have?");
+        Check(list.Action=="list" && list.Reply.Contains("Work on slides") && !list.Reply.Contains("Archive notes"),"query active reminders without a model");
+        Check(Read("What's due today?").Reply.Contains("nothing due"),"a progress check is not a deadline");
+        Check(Read("show my reminders for today").Reply.Contains("Work on slides") && !Read("show my reminders for today").Reply.Contains("OS lab"),"today uses local calendar boundaries");
         Console.WriteLine(checks+" language checks passed");
     }
 }

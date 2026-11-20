@@ -1,6 +1,6 @@
 # Blink
 
-Blink is a small Windows desktop pet that keeps track of work, checks in on progress, and reminds you when a file is due. It runs independently of Codex and ChatGPT. You can schedule reminders and receive Windows notifications offline.
+Blink is a small Windows desktop pet that texts you when it’s time to check in. Reminders arrive in a local conversation. A red dot and a waiting expression on the pet let you know there’s a message for you. Scheduling, receiving messages, and replying work offline.
 
 ## Try the pet
 
@@ -8,14 +8,19 @@ For a ready-to-run copy, download the [Windows prototype ZIP](https://github.com
 
 Open **Blink.exe** from the extracted prototype folder. If you have the previous prototype running, right-click its dot and quit it first. Blink imports its saved reminders on first launch.
 
-1. Click **Test in 10 seconds**, then **Hide pet**.
-2. Leave Blink running. After about ten seconds, watch for a Windows notification. Windows controls whether a banner appears according to your notification and Do Not Disturb settings.
-3. Click the notification to open the reminder, or right-click Blink in the Windows notification area and choose **Show pending reminders**. Click **Got it** to clear the test.
-4. To restore just the pet, choose **Show pet** from its notification-area menu. Double-click the icon to open the conversation. The icon may be under the hidden-icons arrow.
+1. Click the floating pet to open your conversation. Choose **Upcoming**, or type “What reminders do I have?” to check your list. You can also ask “What’s due today?”
+2. For a quick test, choose **New reminder**, click **Test in 10 seconds**, then **Hide** to close the editor. Leave the floating pet visible.
+3. Keep working. After about ten seconds the pet shows a red indicator. The incoming message waits without taking focus.
+4. Click the pet, type “Got it” in the reply box, and send it. Your reply appears in the thread. Opening the conversation or closing it to reply later keeps the message pending.
+5. Use **Hide pet** when you want the desktop clear. Messages still arrive. Right-click Blink’s icon in the Windows notification area to reopen its inbox. The icon may be under the hidden-icons arrow.
 
-Click the floating pet to talk, or drag it to a different part of your screen. **Hide** closes the conversation. **Hide pet** keeps the scheduler and Windows messages running in the background. **Quit Blink** exits the program.
+Click the pet again or use the chat’s close button to collapse the panel and leave Blink floating. Drag the pet to move it out of your way. **Quit Blink** exits the program. Unanswered reminder messages and your reply history are saved locally across restarts.
+
+Reminders arrive silently by default. If you also want Windows banners, enable **Windows notification banners** in the pet’s right-click menu.
 
 ## Make the pet yours
+
+The pet starts at **Small (44 logical pixels)**. Choose **Medium (54)** in **Customize pet** for a slightly larger face. Windows display scaling determines the physical pixel count. Both sizes use the same high-resolution artwork.
 
 Open **Customize pet**. Give the pet a name, pick its color, and choose a voice: Calm, Playful, or Direct. The voice changes reminder wording even when AI is offline. Choose a character such as Sleepy or Energetic to change the pet’s eyes and blink rhythm, or type a description of your own. Save and run the ten-second test to see your pet send a message in its own name. Each Windows account keeps its settings in its own local profile.
 
@@ -27,7 +32,7 @@ Try typing this into Blink. It will ask for clarification if it needs a time.
 
 Select the report to see the saved times. **Snooze 10 min** moves the check-in. The submission deadline stays in place. When you finish writing, tell Blink “I finished writing”. The task stays open until you confirm submission. When you upload it, say “I submitted it”. You can also ask “What should I work on now?”
 
-For a deadline more than 30 minutes away, Blink schedules a heads-up 30 minutes before it and a reminder at the deadline. Add a separate check-in to choose another nudge time. **Set manually** lets you enter the dates and flag a task as a submission yourself.
+For a deadline more than 30 minutes away, Blink sends a message 30 minutes before it and another at the deadline. Add a separate check-in to choose another time. **Set manually** lets you enter the dates and flag a task as a submission yourself.
 
 ## Optional local AI
 
