@@ -1,5 +1,7 @@
 # Reminder Dot
 
+**Try the Windows prototype.** Open `ReminderDot.exe`, click **Test in 10 seconds**, then close the editor. Leave the dot running. A desktop message appears after about ten seconds. Click **OK**, then click the dot to see that the test reminder has cleared.
+
 Reminder Dot runs independently of Codex and ChatGPT. Scheduling and desktop alerts work offline without an account, subscription, or API key. For optional AI parsing, install a local chat model with Ollama, for example with `ollama pull llama3.2:3b`, and leave Ollama running while interpreting a request. Once you save a reminder, only Reminder Dot needs to stay running.
 
 A standalone Windows desktop companion. Double-click `build.cmd` to build with the .NET Framework compiler included on Windows systems with .NET Framework 4.8, then open `ReminderDot.exe`.
