@@ -112,7 +112,17 @@ class ReminderDot : Form {
         upcoming.SetBounds(16,237,428,75); upcoming.HorizontalScrollbar = true;
         var remove = new Button { Text = "Remove selected" }; remove.SetBounds(16,318,155,32);
         remove.Click += delegate { var selected = upcoming.SelectedItem as Reminder; if (selected != null && Commit(items.Where(x=>x!=selected).ToList())) status.Text="Reminder removed."; };
-        panel.Controls.AddRange(new Control[]{ title,input,interpret,when,save,status,label,upcoming,remove });
+        var test = new Button { Text = "Test in 10 seconds" };
+        test.SetBounds(262,318,182,32);
+        test.Click += delegate {
+            var sample = new Reminder {
+                Message = "Your test reminder is here. Click OK to dismiss it.",
+                UtcTicks = DateTime.UtcNow.AddSeconds(10).Ticks
+            };
+            if (Commit(new List<Reminder>(items) { sample }))
+                status.Text = "Test set. You can close this window and wait for the pop-up.";
+        };
+        panel.Controls.AddRange(new Control[]{ title,input,interpret,when,save,status,label,upcoming,remove,test });
         RefreshList();
     }
 
