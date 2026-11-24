@@ -342,12 +342,12 @@ class ReminderDot : Form {
             if (!TryOpenChecklist(out error)) MessageBox.Show(error,"Blink checklist",MessageBoxButtons.OK,MessageBoxIcon.Information);
         });
         banners = new ToolStripMenuItem("Windows notification banners");
-        string bannerFile = Path.Combine(dataDirectory,"notification-banners.enabled");
-        banners.Checked = File.Exists(bannerFile);
+        string bannerFile = Path.Combine(dataDirectory,"notification-banners.disabled");
+        banners.Checked = !File.Exists(bannerFile);
         banners.Click += delegate {
             try {
-                if (banners.Checked) File.Delete(bannerFile);
-                else { Directory.CreateDirectory(dataDirectory); File.WriteAllText(bannerFile,"enabled"); }
+                if (!banners.Checked) File.Delete(bannerFile);
+                else { Directory.CreateDirectory(dataDirectory); File.WriteAllText(bannerFile,"disabled"); }
                 banners.Checked = !banners.Checked;
             } catch (Exception e) { ShowEditor(); Say("I couldn’t save the notification setting. " + e.Message); }
         };
@@ -1485,6 +1485,7 @@ class ReminderDot : Form {
             RefreshTasks(focusId); SyncInbox(showIncoming ? due[0].MessageId : null);
             if (banners.Checked) {
                 var newest = due[0]; notifiedMessageId = newest.MessageId;
+                tray.BalloonTipIcon = ToolTipIcon.Info;
                 tray.BalloonTipTitle = profile.Name;
                 string text = newest.Text + (due.Count > 1 ? " You have " + due.Count + " new messages." : "");
                 tray.BalloonTipText = text.Length > 245 ? text.Substring(0,244) + "…" : text;

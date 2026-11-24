@@ -40,8 +40,12 @@ static class Language {
     static Intent Ask(string question) { return new Intent { Action="ask", Reply=question }; }
     static string Words(string input) { return (input ?? "").Trim().Trim(' ', '.', ',', '!', '?'); }
 
+    static Match TimeCorrection(string request) {
+        return Find(request,@"^(?:(?:the\s+)?same\s+(?:day|date)\s*,?\s*(?:(?:but|and)\s+)?(?:at\s+)?|(?=(?:the\s+)?time\s+is\s+))(?:(?:the\s+)?time\s+(?:is|should be)\s+)?(?<clock>"+Hour+@")$");
+    }
     public static bool IsNewRequest(string text) {
         string request=Words(text);
+        if(TimeCorrection(request).Success) return false;
         if(Find(request,@"^(?:change it to|remind me again)\b").Success) return false;
         if(TaskCommands.CaptureTitle(request)!=null ||
             Find(request,@"^(?:(?:could|can|would) you\s+)?(?:"+ReminderPrefix+@"(?:\s|$)|(?:please\s+)?(?:set|add|create|schedule)\s+(?:(?:a|an|my|another|new)\s+)*(?:reminder|task|deadline)\b|i\s+(?:(?:need|want|have)\s+to|wanna)\s+|(?:rename|cancel|remove|delete|reschedule|postpone|change|move)\s+)").Success ||
@@ -166,6 +170,8 @@ static class Language {
         string value=NormalizeSchedule(Words(answer),now);
         value=Regex.Replace(value,@"^(?:(?:(?:no|actually|instead|sorry)[, ]+)|(?:(?:make it|change it to|i meant|i mean|use|on|at)\s+))+","",Options);
         value=Words(Regex.Replace(value,@"\s+(?:instead|please)$","",Options));
+        var correction=TimeCorrection(value);
+        if(correction.Success) value=correction.Groups["clock"].Value;
         var parts=Find(value,@"^(?:(?<day>"+Day+@")(?:\s+(?:at\s+)?)?)?(?<clock>"+Hour+@")?$");
         string day=parts.Groups["day"].Value,clock=parts.Groups["clock"].Value.Trim();
         var other=UnclearDate(context);
@@ -387,6 +393,7 @@ static class Language {
                 if(match!=null) return new Intent {Action="submitted",Id=match.Id};
             }
         }
+        if(TimeCorrection(request).Success) return Ask("Which reminder would you like to change?");
         var local=Offline(request,localNow,tasks,selected);
         if(local!=null) return local;
         return await FromModel(request,localNow,tasks,selected,context,profile);

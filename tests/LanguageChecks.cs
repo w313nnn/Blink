@@ -51,6 +51,12 @@ class LanguageChecks {
     }
     static void Main() {
         CheckCalendarClarification();
+        var sent=new DateTime(2026,11,25,1,54,10,DateTimeKind.Local);
+        string first="remind me at 01:54am on 25/11/2026 to drink water";
+        string correction="same date but the time is 01:55am";
+        Check(!Language.IsNewRequest(correction),"time correction stays in conversation");
+        CheckReminder(At(sent,correction,Turn(first,At(sent,first))),"drink water",sent.Date.AddMinutes(115),"same date preserves the task");
+        Check(At(sent,correction).Action=="ask","orphaned correction cannot become a task");
         var simple=Read("Remind me to stretch in 20 minutes");
         Check(simple.Action=="create" && simple.Title=="stretch" && simple.CheckUtc==Now.ToUniversalTime().AddMinutes(20),"relative seconds");
         const string waterRequest="pls remind to drink water on 2:13pm later";
