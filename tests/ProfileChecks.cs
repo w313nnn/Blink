@@ -20,8 +20,9 @@ class ProfileChecks {
         return (Math.Max(x,y)+0.05)/(Math.Min(x,y)+0.05);
     }
     static void CheckThemes(string root) {
-        Check(PetProfile.Appearances.SequenceEqual(new[]{"Red","Yellow","Blue","Purple","Green"}) &&
-            new PetProfile().Appearance=="Green","five named colors and a green default");
+        var rainbow = new[]{"Red","Orange","Yellow","Green","Blue","Purple"};
+        Check(PetProfile.Appearances.SequenceEqual(rainbow) &&
+            new PetProfile().Appearance=="Green","six colors in rainbow order and a green default");
         var coats=new HashSet<int>();
         var outgoingColors=new HashSet<int>();
         foreach(string name in PetProfile.Appearances) {
@@ -36,7 +37,7 @@ class ProfileChecks {
                 name+" has readable chat text and button labels");
             coats.Add(theme.Coat.ToArgb());outgoingColors.Add(theme.Outgoing.ToArgb());
         }
-        Check(coats.Count==5 && outgoingColors.Count==5,"five distinct coats and chat palettes");
+        Check(coats.Count==rainbow.Length && outgoingColors.Count==rainbow.Length,"distinct coats and chat palettes for every rainbow color");
         foreach(var pair in new Dictionary<string,string>{{"Fern","Green"},{"Ocean","Blue"},{"Plum","Purple"}}) {
             string dir=Path.Combine(root,"legacy-"+pair.Key);
             Directory.CreateDirectory(dir);

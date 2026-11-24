@@ -671,7 +671,8 @@ class ReminderDot : Form {
             Caption(dialog,"Personality",16,127,320,20,10,true);
             var tone = Choose(dialog,"Personality",150,PetProfile.Personalities,profile.Personality);
             Caption(dialog,"Pet and chat color",16,187,320,20,10,true);
-            var choices = new Panel { AccessibleName="Appearance" }; BoundsInUnits(choices,16,211,325,68); dialog.Controls.Add(choices);
+            const int paletteWidth=325, swatchGap=5;
+            var choices = new Panel { AccessibleName="Appearance" }; BoundsInUnits(choices,16,211,paletteWidth,68); dialog.Controls.Add(choices);
             var preview = new Panel { AccessibleName="Chat color preview" }; BoundsInUnits(preview,16,288,325,52); dialog.Controls.Add(preview);
             var samplePet=Caption(preview,"How’s the report going?",8,6,165,28,9,false);
             var sampleUser=Caption(preview,"Still working",201,18,113,27,9,false);
@@ -688,10 +689,11 @@ class ReminderDot : Form {
             string selectedColor=profile.Appearance;
             for (int i=0;i<PetProfile.Appearances.Length;i++) {
                 string colorName=PetProfile.Appearances[i];
-                var candidate=profile.Copy(); candidate.Appearance=colorName;
-                var colors=candidate.GetTheme();
+                var colors=PetTheme.For(colorName);
                 var option=new ColorChoice(colorName,colors);
-                BoundsInUnits(option,i*66,0,61,68); choices.Controls.Add(option);
+                int left=i*(paletteWidth+swatchGap)/PetProfile.Appearances.Length;
+                int right=(i+1)*(paletteWidth+swatchGap)/PetProfile.Appearances.Length-swatchGap;
+                BoundsInUnits(option,left,0,right-left,68); choices.Controls.Add(option);
                 option.Checked=colorName==selectedColor;
                 option.CheckedChanged+=delegate { if (option.Checked) { selectedColor=colorName; showPreview(colors); } };
             }

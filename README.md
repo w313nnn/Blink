@@ -16,7 +16,7 @@ Reminders arrive silently. Turn on **Windows notification banners** in the pet�
 
 ## Customize Blink
 
-Click the pet’s picture at the top of the conversation, or right-click the floating pet and choose **Customize pet**. Pick a pastel swatch to preview it on the pet and on sample messages. Choose Red, Yellow, Blue, Purple or Green, then select **Save**. The colour applies to the floating pet, its tray icon and the whole conversation, including earlier messages.
+Click the pet’s picture at the top of the conversation, or right-click the floating pet and choose **Customize pet**. The six pastel swatches are Red, Orange, Yellow, Green, Blue and Purple, in rainbow order. Click a swatch to preview it on the pet and on sample messages. Select **Save** to apply the colour to the floating pet, its tray icon and the whole conversation, including earlier messages.
 
 Hover over Blink to see its eyes curve into a smile. Hold the left mouse button and its eyes widen. Drag it to a new spot and release to set it down. When you change colours or wait for a local AI reply, Blink spins and blinks in the middle of the conversation. If you turn off animation effects in Windows, it holds still there.
 

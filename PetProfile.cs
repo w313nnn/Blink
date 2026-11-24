@@ -30,14 +30,16 @@ public sealed class PetTheme {
     }
 
     static readonly PetTheme Red = new PetTheme(0xF3A7A5, 0x923E45, 0x482326);
+    static readonly PetTheme Orange = new PetTheme(0xF6BD91, 0x89461D, 0x492D1B);
     static readonly PetTheme Yellow = new PetTheme(0xF6D77E, 0x755413, 0x403216);
+    static readonly PetTheme Green = new PetTheme(0xA6DBB4, 0x396A4C, 0x243D2F);
     static readonly PetTheme Blue = new PetTheme(0xA5C8F3, 0x365E94, 0x22364F);
     static readonly PetTheme Purple = new PetTheme(0xC9B4EF, 0x664595, 0x392949);
-    static readonly PetTheme Green = new PetTheme(0xA6DBB4, 0x396A4C, 0x243D2F);
 
     public static PetTheme For(string name) {
         switch (name) {
             case "Red": return Red;
+            case "Orange": return Orange;
             case "Yellow": return Yellow;
             case "Blue": case "Ocean": return Blue;
             case "Purple": case "Plum": return Purple;
@@ -49,7 +51,7 @@ public sealed class PetTheme {
 public sealed class PetProfile {
     public const string DefaultName = "Blink";
     public static readonly string[] Personalities = { "Calm", "Playful", "Direct" };
-    public static readonly string[] Appearances = { "Red", "Yellow", "Blue", "Purple", "Green" };
+    public static readonly string[] Appearances = { "Red", "Orange", "Yellow", "Green", "Blue", "Purple" };
     public static readonly string[] Sizes = { "Small", "Medium" };
 
     public string Name { get; set; }
