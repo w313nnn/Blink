@@ -12,9 +12,55 @@ class LanguageChecks {
     static Intent Read(string request,TaskItem selected=null,string context=null) {
         return Language.Read(request,Now,Items,selected,context).GetAwaiter().GetResult();
     }
+    static Intent At(DateTime clock,string text,string context = null) {
+        return Language.Read(text,clock,new List<TaskItem>(),null,context).GetAwaiter().GetResult();
+    }
+    static string Turn(string request,Intent question) {
+        return "User: "+request+"\nBlink: "+(question.ContextReply ?? question.Reply);
+    }
+    static void CheckReminder(Intent reminder,string title,DateTime localWhen,string scenario) {
+        Check(reminder.Action=="create" && reminder.Title==title && reminder.CheckUtc==localWhen.ToUniversalTime()
+            && !reminder.DeadlineUtc.HasValue && !reminder.Submission,scenario);
+    }
+    static void CheckCalendarClarification() {
+        var clock=new DateTime(2026,11,25,0,39,0,DateTimeKind.Local);
+        const string request="remind me to drink water on 12:40am 21th november 2026";
+        CheckReminder(At(clock,request.Replace("21th november","26th november")),"drink water",
+            clock.Date.AddDays(1).AddMinutes(40),"explicit future day plus midnight clock");
+        CheckReminder(At(clock,request.Replace("november 2026","december 2026")),"drink water",
+            new DateTime(2026,12,21,0,40,0,DateTimeKind.Local),"nonstandard ordinal with a future date");
+        var question=At(clock,request);
+        Check(question.Action=="ask" && !question.CheckUtc.HasValue && !question.DeadlineUtc.HasValue,
+            "an explicitly past calendar date needs clarification");
+        string context=Turn(request,question);
+        CheckReminder(At(clock,"2026-11-25",context),"drink water",clock.AddMinutes(1),
+            "screenshot date reply keeps the task and its original 00:40 clock time");
+        var late=At(clock.AddMinutes(2),"2026-11-25",context);
+        Check(late.Action=="ask" && !late.CheckUtc.HasValue,"clock elapsed while the question was open");
+        CheckReminder(At(clock.AddMinutes(2),"2026-11-26",context+"\n"+Turn("2026-11-25",late)),
+            "drink water",clock.Date.AddDays(1).AddMinutes(40),"a second date reply repairs the elapsed date");
+        var invalid=At(clock,"2026-11-31",context);
+        Check(invalid.Action=="ask" && !invalid.CheckUtc.HasValue,"invalid calendar day does not schedule");
+        var midnight=new DateTime(2026,12,31,23,59,0,DateTimeKind.Local);
+        var yearEnd=At(midnight,request);
+        CheckReminder(At(midnight,"2027-01-01",Turn(request,yearEnd)),"drink water",
+            midnight.Date.AddDays(1).AddMinutes(40),"date clarification crosses midnight and year end");
+        Check(At(clock,"2026-11-25").Action=="ask","a date on its own does not create a task");
+        CheckReminder(At(clock,"Remind me to call Alex in 2 hours",context),"call Alex",clock.AddHours(2),
+            "an independent reminder can replace a pending date question");
+    }
     static void Main() {
+        CheckCalendarClarification();
         var simple=Read("Remind me to stretch in 20 minutes");
         Check(simple.Action=="create" && simple.Title=="stretch" && simple.CheckUtc==Now.ToUniversalTime().AddMinutes(20),"relative seconds");
+        const string waterRequest="pls remind to drink water on 2:13pm later";
+        var beforeTime=Now.Date.AddHours(14).AddMinutes(12);
+        var water=Language.Read(waterRequest,beforeTime,Items,null,null).GetAwaiter().GetResult();
+        Check(water.Action=="create" && water.Title=="drink water" && water.CheckUtc==beforeTime.AddMinutes(1).ToUniversalTime(),"casual same-day wall-clock reminder");
+        var tomorrow=Language.Read(waterRequest,beforeTime.AddMinutes(2),Items,null,null).GetAwaiter().GetResult();
+        Check(tomorrow.CheckUtc==beforeTime.AddDays(1).AddMinutes(1).ToUniversalTime(),"a passed clock time uses its next occurrence");
+        Check(Read("please remind me on 2:13 pm to drink water").Title=="drink water","clock before title");
+        Check(Read("remind me to work on 2 slides in 10 minutes").Title=="work on 2 slides","a count after on is not a clock");
         string report="My OS lab report PDF is due Friday at 5. Check in with me tomorrow at 7 pm to see how the writing is going.";
         var question=Read(report);
         Check(question.Action=="ask" && question.Reply.Contains("5 pm"),"ambiguity");

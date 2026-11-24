@@ -47,21 +47,30 @@ public sealed class ChatEntry {
     public ChatEntry Copy() { return (ChatEntry)MemberwiseClone(); }
 }
 
-public sealed class TaskStore {
+public sealed class ChatPrompt {
+    public string Context { get; set; }
+    public string SelectedTaskId { get; set; }
+    public ChatPrompt Copy() { return (ChatPrompt)MemberwiseClone(); }
+}
+
+public sealed partial class TaskStore {
     // Treat all objects in the committed state as immutable. Writers replace changed records.
     public sealed class SavedData {
         public List<TaskItem> Items { get; set; }
         public List<Nudge> Inbox { get; set; }
         public List<ChatEntry> History { get; set; }
+        public Dictionary<string,ChatPrompt> Questions { get; set; }
 
         public SavedData() {
             Items = new List<TaskItem>();
             Inbox = new List<Nudge>();
             History = new List<ChatEntry>();
+            Questions = new Dictionary<string,ChatPrompt>();
         }
         public SavedData Copy() {
             return new SavedData {
-                Items = new List<TaskItem>(Items), Inbox = new List<Nudge>(Inbox), History = new List<ChatEntry>(History)
+                Items = new List<TaskItem>(Items), Inbox = new List<Nudge>(Inbox), History = new List<ChatEntry>(History),
+                Questions = new Dictionary<string,ChatPrompt>(Questions)
             };
         }
     }
@@ -70,6 +79,16 @@ public sealed class TaskStore {
     readonly object gate = new object();
     readonly JavaScriptSerializer json = new JavaScriptSerializer { MaxJsonLength = Int32.MaxValue };
     SavedData data;
+    long revision;
+    public long Revision { get { lock (gate) return revision; } }
+
+    public TaskItem FindActive(string id) {
+        if (id==null) return null;
+        lock(gate) {
+            var item=data.Items.FirstOrDefault(t=>t.Id==id && t.Stage!="done");
+            return item==null ? null : item.Copy();
+        }
+    }
 
     public TaskStore(string path) {
         this.path = Path.GetFullPath(path);
@@ -81,16 +100,18 @@ public sealed class TaskStore {
             else data = json.Deserialize<SavedData>(saved);
             if (data == null || data.Items == null || data.Inbox == null || data.History == null)
                 throw new InvalidDataException("Blink could not read the saved messages and tasks.");
+            if (data.Questions == null) data.Questions = new Dictionary<string,ChatPrompt>();
             foreach (var task in data.Items) Validate(task);
             if (data.Items.Select(t => t.Id).Distinct().Count() != data.Items.Count)
                 throw new InvalidDataException("The task list has duplicate identifiers.");
             foreach (var n in data.Inbox) n.SentUtc = Utc(n.SentUtc).Value;
             foreach (var e in data.History) e.AtUtc = Utc(e.AtUtc).Value;
+            TryRefreshChecklist();
             return;
         }
 
         string legacyPath = Path.Combine(Path.GetDirectoryName(this.path), "reminders.json");
-        if (!File.Exists(legacyPath)) return;
+        if (!File.Exists(legacyPath)) { TryRefreshChecklist(); return; }
         var old = json.Deserialize<List<LegacyReminder>>(File.ReadAllText(legacyPath));
         if (old == null) throw new InvalidDataException("Blink could not import the previous reminder list.");
         var imported = new SavedData();
@@ -110,6 +131,12 @@ public sealed class TaskStore {
     public List<ChatEntry> History {
         get { lock (gate) return data.History.Select(e => e.Copy()).ToList(); }
     }
+    public ChatPrompt Question(string messageId) {
+        lock (gate) {
+            ChatPrompt question;
+            return data.Questions.TryGetValue(messageId,out question) && question != null ? question.Copy() : null;
+        }
+    }
 
     static void Put(SavedData next, TaskItem value) {
         var task = value.Copy();
@@ -118,7 +145,10 @@ public sealed class TaskStore {
         task.DeadlineDelivered = index >= 0 && next.Items[index].DeadlineUtc == task.DeadlineUtc && next.Items[index].DeadlineDelivered;
         if (index >= 0) next.Items[index] = task;
         else next.Items.Add(task);
-        if (task.Stage == "done") next.Inbox.RemoveAll(n => n.Id == task.Id);
+        if (task.Stage == "done") {
+            foreach (var n in next.Inbox.Where(n=>n.Id==task.Id)) next.Questions.Remove(n.MessageId);
+            next.Inbox.RemoveAll(n => n.Id == task.Id);
+        }
     }
 
     public void Save(TaskItem item) {
@@ -133,6 +163,7 @@ public sealed class TaskStore {
         lock (gate) {
             var next = data.Copy();
             if (next.Items.RemoveAll(t => t.Id == id) == 0) return;
+            foreach (var e in next.History.Where(e => e.TaskId == id)) next.Questions.Remove(e.MessageId);
             next.Inbox.RemoveAll(n => n.Id == id);
             next.History.RemoveAll(e => e.TaskId == id);
             Commit(next);
@@ -203,6 +234,7 @@ public sealed class TaskStore {
             var next = data.Copy();
             if (changed != null) Put(next,changed);
             next.Inbox.RemoveAll(n => n.MessageId == messageId);
+            next.Questions.Remove(messageId);
             AppendExchange(next,messageId,original.Id,reply,petResponse);
             Commit(next);
             return true;
@@ -223,11 +255,19 @@ public sealed class TaskStore {
     }
 
     public void Chat(string messageId,string taskId,string userText,string petText) {
+        CommitChat(messageId,taskId,userText,petText,null,null);
+    }
+
+    // Store what Blink says together with the task change or question that makes it true.
+    public void CommitChat(string messageId,string taskId,string userText,string petText,TaskItem change,ChatPrompt nextQuestion) {
         if (String.IsNullOrWhiteSpace(messageId) || String.IsNullOrWhiteSpace(taskId) ||
             String.IsNullOrWhiteSpace(userText) || String.IsNullOrWhiteSpace(petText))
             throw new ArgumentException("A conversation needs a thread and both messages.");
         lock (gate) {
             var next = data.Copy();
+            if (change != null) Put(next,change);
+            if (nextQuestion == null) next.Questions.Remove(messageId);
+            else next.Questions[messageId] = nextQuestion.Copy();
             AppendExchange(next,messageId,taskId,userText,petText);
             Commit(next);
         }
@@ -267,7 +307,10 @@ public sealed class TaskStore {
             }
             if (File.Exists(path)) File.Replace(temp, path, null);
             else File.Move(temp, path);
+            bool checklistChanged = checklistNeedsRefresh || !next.Items.SequenceEqual(data.Items) || !next.Inbox.SequenceEqual(data.Inbox);
             data = next;
+            revision++;
+            if (checklistChanged) TryRefreshChecklist();
         } finally {
             if (File.Exists(temp)) File.Delete(temp);
         }

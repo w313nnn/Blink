@@ -13,50 +13,106 @@ using System.Windows.Forms;
 using Microsoft.Win32;
 
 sealed class ConversationPopover : Form {
-    protected override CreateParams CreateParams {
-        get {
-            var p = base.CreateParams;
-            p.ClassStyle |= 0x00020000; // CS_DROPSHADOW gives the compact panel separation on busy desktops.
-            return p;
-        }
+    public event Action MonitorScaleChanged;
+    [DllImport("user32.dll")] static extern uint GetDpiForWindow(IntPtr hwnd);
+    public int MonitorDpi(int fallback) {
+        if (IsHandleCreated) try { var dpi = GetDpiForWindow(Handle); if (dpi>0) return (int)dpi; }
+        catch (EntryPointNotFoundException) { }
+        return fallback;
     }
+    public ConversationPopover() {
+        SetStyle(ControlStyles.Opaque | ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer,true);
+    }
+    protected override void OnPaint(PaintEventArgs e) {
+        e.Graphics.Clear(BackColor);
+        base.OnPaint(e);
+    }
+    protected override void OnHandleCreated(EventArgs e) {
+        base.OnHandleCreated(e);
+        int round = 2;
+        DwmSetWindowAttribute(Handle,33,ref round,sizeof(int));
+    }
+    protected override void WndProc(ref Message m) {
+        base.WndProc(ref m);
+        if (m.Msg == 0x02e0 && MonitorScaleChanged != null && !IsDisposed && !Disposing)
+            BeginInvoke((Action)(() => { if (!IsDisposed && !Disposing && MonitorScaleChanged != null) MonitorScaleChanged(); }));
+    }
+    [DllImport("dwmapi.dll")] static extern int DwmSetWindowAttribute(IntPtr hwnd,int attr,ref int value,int size);
 }
 
 class ReminderDot : Form {
-    static readonly Color Ink = Color.FromArgb(31, 45, 42);
-    static readonly Color Teal = Color.FromArgb(20, 91, 79);
-    static readonly Color Paper = Color.FromArgb(249, 248, 242);
-    static readonly Color Soft = Color.FromArgb(230, 237, 229);
-
+    static readonly float panelScale = ReadPanelScale();
+    static readonly Dictionary<string,Font> fonts = new Dictionary<string,Font>();
+    [DllImport("user32.dll")] static extern uint GetDpiForSystem();
+    [DllImport("user32.dll")] static extern IntPtr SetThreadDpiAwarenessContext(IntPtr context);
+    static float ReadPanelScale() {
+        try { uint dpi = GetDpiForSystem(); if (dpi != 0) return dpi / 96F; }
+        catch(EntryPointNotFoundException) { }
+        using (var g = Graphics.FromHwnd(IntPtr.Zero)) return g.DpiX / 96F;
+    }
+    static int Px(int logical) { return (int)Math.Round(logical*panelScale); }
+    static Size PanelSize(int w,int h) { return new Size(Px(w),Px(h)); }
+    static void BoundsInUnits(Control c,int x,int y,int w,int h) {
+        c.SetBounds(Px(x),Px(y),Px(x+w)-Px(x),Px(y+h)-Px(y));
+    }
+    static Font UiFont(float size,FontStyle style = FontStyle.Regular,int dpi = 0) {
+        string key = size.ToString(System.Globalization.CultureInfo.InvariantCulture) + ":" + style + ":" + dpi;
+        Font font;
+        if (!fonts.TryGetValue(key,out font)) {
+            font = dpi == 0 ? new Font("Segoe UI",size,style) : new Font("Segoe UI",size*dpi/72f,style,GraphicsUnit.Pixel);
+            fonts.Add(key,font);
+        }
+        return font;
+    }
+    static void WithPanelDpi(Action operation,bool perMonitor = false) {
+        IntPtr old = IntPtr.Zero;
+        try { old = SetThreadDpiAwarenessContext(new IntPtr(perMonitor ? -4 : -2)); }
+        catch (EntryPointNotFoundException) { }
+        try { operation(); }
+        finally { if (old != IntPtr.Zero) SetThreadDpiAwarenessContext(old); }
+    }
+    PetTheme theme;
     readonly TaskStore store;
     readonly string dataDirectory;
     PetProfile profile;
     readonly Form editor = new Form();
-    readonly Form notice = new ConversationPopover();
-    readonly Panel avatar = new Panel();
+    readonly ConversationPopover notice = new ConversationPopover();
+    readonly Button avatar = new Button();
     readonly Panel composer = new Panel();
+    readonly Panel chatRule = new Panel();
     readonly RichTextBox conversation = new RichTextBox();
     readonly TextBox input = new TextBox();
     readonly ListBox tasks = new ListBox();
     readonly Label model = new Label();
     Label taskHeading, petName, noticeName;
-    readonly Panel messageThread = new Panel();
+    sealed class ThreadPanel : Panel { public ThreadPanel() { DoubleBuffered=true; } }
+    readonly Panel messageThread = new ThreadPanel();
+    ConversationMotion editorMotion, chatMotion;
     readonly TextBox replyBox = new TextBox();
+    readonly Dictionary<string,string> drafts = new Dictionary<string,string>();
+    string composingFor;
     readonly Label messageStatus = new Label();
     readonly ComboBox eventList = new ComboBox();
     readonly List<Nudge> outstanding = new List<Nudge>();
     readonly Timer timer = new Timer();
     readonly Timer blink = new Timer();
+    readonly System.Diagnostics.Stopwatch petClock = new System.Diagnostics.Stopwatch();
+    PetSurface petSurface;
+    long nextPetSurfaceAttempt;
+    Size petRegionSize;
+    bool petRegionWaiting;
+    bool holdingPet, draggingPet;
+    EyeExpression responseExpression;
+    DateTime expressionUntil;
     readonly NotifyIcon tray = new NotifyIcon();
     Icon trayIcon, waitingIcon;
     ToolStripMenuItem banners;
     Button send, finish, sendReply, messagesButton, acknowledge, snoozeReply, closeChat, upcoming, newReminder;
     readonly ToolTip hints = new ToolTip();
-    string context = "", focusId;
+    string focusId;
     bool refreshing, busy, quitting, urgent, petHidden, eyesClosed, hovering, rebuilding, replying;
     string notifiedMessageId;
     const string GlobalChat = "__general";
-    readonly Dictionary<string,string> questions = new Dictionary<string,string>();
     DateTime nextPoll = DateTime.MinValue;
 
     static string DataDirectory() {
@@ -92,6 +148,7 @@ class ReminderDot : Form {
             // A cosmetic setting must never prevent the reminder scheduler from starting.
             profile = new PetProfile(); profileUnavailable = true;
         }
+        theme = profile.GetTheme();
         store = new TaskStore(Path.Combine(dir, "tasks.json"));
         Text = "Blink dot"; AccessibleName = Text; AutoScaleMode = AutoScaleMode.None;
         FormBorderStyle = FormBorderStyle.None;
@@ -99,34 +156,54 @@ class ReminderDot : Form {
         ShowInTaskbar = false; TopMost = true; DoubleBuffered = true;
         var area = Screen.PrimaryScreen.WorkingArea;
         Location = new Point(area.Right - Width - 22, area.Bottom - Height - 22);
-        BuildDotMenu(); BuildEditor(); BuildNotice();
+        BuildDotMenu();
+        WithPanelDpi(() => { BuildEditor(); var handle=editor.Handle; });
+        WithPanelDpi(() => { BuildNotice(); var handle=notice.Handle; },true);
+        notice.MonitorScaleChanged += RenderNotice;
         ApplyProfile(); SyncInbox();
         if (profileUnavailable) Say("I couldn’t load your pet settings, so I’m using the default appearance. You can save new settings in Customize pet.");
         RefreshTasks(null);
-        MouseEnter += delegate { hovering = true; RefreshPet(); };
-        MouseLeave += delegate { hovering = false; RefreshPet(); };
-        blink.Interval = profile.BlinkIntervalMs;
-        blink.Tick += delegate {
-            eyesClosed = !eyesClosed;
-            blink.Interval = eyesClosed ? 150 : profile.BlinkIntervalMs;
-            if (Visible) RefreshPet();
+        MouseEnter += delegate { hovering = true; PaintPetFrame(); };
+        MouseLeave += delegate { hovering = false; PaintPetFrame(); };
+        blink.Interval = 30;
+        blink.Tick += delegate { PaintPetFrame(); };
+        VisibleChanged += delegate {
+            if (Visible && !quitting) { petClock.Start(); blink.Start(); RefreshPet(); }
+            else { blink.Stop(); petClock.Stop(); ReleasePetSurface(); }
         };
-        blink.Start();
         Point down = Point.Empty, origin = Point.Empty; bool moved = false;
-        MouseDown += (s,e) => { if (e.Button == MouseButtons.Left) { down = Cursor.Position; origin = Location; moved = false; Capture = true; } };
+        MouseDown += (s,e) => {
+            if (e.Button != MouseButtons.Left) return;
+            down = PointToScreen(e.Location); origin = Location; moved = false;
+            Capture = true; holdingPet = true; PaintPetFrame();
+        };
+        MouseCaptureChanged += delegate {
+            if (Capture || !holdingPet) return;
+            holdingPet = draggingPet = false;
+            hovering = ClientRectangle.Contains(PointToClient(Cursor.Position));
+            PaintPetFrame();
+        };
         MouseMove += (s,e) => {
-            if (e.Button != MouseButtons.Left || !Capture) return;
-            int dx = Cursor.Position.X - down.X, dy = Cursor.Position.Y - down.Y;
-            if (Math.Abs(dx) + Math.Abs(dy) > 4) moved = true;
+            if (e.Button != MouseButtons.Left || !holdingPet || !Capture) return;
+            Point pointer = PointToScreen(e.Location);
+            int dx = pointer.X - down.X, dy = pointer.Y - down.Y;
+            if (Math.Abs(dx) + Math.Abs(dy) > 4) moved = draggingPet = true;
             if (moved) {
                 var bounds = Screen.FromPoint(Cursor.Position).WorkingArea;
-                Location = Clamp(new Point(origin.X + dx,origin.Y + dy), bounds, Size);
-                Place(editor); Place(notice);
+                Point where = Clamp(new Point(origin.X + dx,origin.Y + dy), bounds, Size);
+                if (where != Location) {
+                    Location = where;
+                    if (editor.Visible) Place(editor);
+                    if (notice.Visible) Place(notice);
+                }
             }
         };
         MouseUp += (s,e) => {
-            if (e.Button != MouseButtons.Left) return;
+            if (e.Button != MouseButtons.Left || !holdingPet) return;
+            holdingPet = draggingPet = false;
             Capture = false;
+            hovering = ClientRectangle.Contains(e.Location);
+            PaintPetFrame();
             if (!moved) {
                 if (notice.Visible) notice.Hide();
                 else OpenInbox();
@@ -138,9 +215,11 @@ class ReminderDot : Form {
         };
         timer.Interval = 750; timer.Tick += delegate { Poll(); }; timer.Start();
         FormClosed += delegate {
-            quitting = true; timer.Dispose(); blink.Dispose(); tray.Visible = false; tray.Dispose();
+            quitting = true; timer.Dispose(); blink.Dispose(); ReleasePetSurface(); tray.Visible = false; tray.Dispose();
             if (trayIcon != null) trayIcon.Dispose(); if (waitingIcon != null) waitingIcon.Dispose();
-            notice.Dispose(); editor.Dispose(); hints.Dispose();
+            chatMotion.Dispose(); editorMotion.Dispose(); notice.Dispose(); editor.Dispose(); hints.Dispose();
+            foreach (var font in fonts.Values) font.Dispose();
+            fonts.Clear();
         };
     }
 
@@ -148,41 +227,118 @@ class ReminderDot : Form {
         get { var p = base.CreateParams; p.ExStyle |= 0x80000; return p; } // WS_EX_LAYERED
     }
     protected override void OnPaint(PaintEventArgs e) {
-        if (profile != null) PetArtwork.Draw(e.Graphics,ClientRectangle,profile.GetColor(),urgent,hovering,eyesClosed,busy,profile.EyeHeight);
+        if (profile==null) return;
+        if (petClock.ElapsedMilliseconds>=nextPetSurfaceAttempt) {
+            PetArtwork.Draw(e.Graphics,ClientRectangle,profile.GetColor(),urgent,hovering,eyesClosed,busy,profile.EyeHeight,DesktopExpression());
+            return;
+        }
+        // During graphics-resource pressure, paint with stock brushes and no frame allocation.
+        int size=ClientSize.Width;
+        e.Graphics.FillEllipse(Brushes.DarkSlateGray,0,0,size-1,size-1);
+        e.Graphics.FillEllipse(Brushes.Honeydew,size*.28f,size*.35f,size*.12f,size*.25f);
+        e.Graphics.FillEllipse(Brushes.Honeydew,size*.57f,size*.35f,size*.12f,size*.25f);
+        if (urgent) e.Graphics.FillEllipse(Brushes.Crimson,size*.70f,0,size*.28f,size*.28f);
     }
-    [StructLayout(LayoutKind.Sequential,Pack=1)]
-    struct AlphaBlend { public byte Operation, Flags, Opacity, Format; }
-    [DllImport("user32.dll")] static extern IntPtr GetDC(IntPtr hwnd);
-    [DllImport("user32.dll")] static extern int ReleaseDC(IntPtr hwnd,IntPtr dc);
-    [DllImport("gdi32.dll")] static extern IntPtr CreateCompatibleDC(IntPtr dc);
-    [DllImport("gdi32.dll")] static extern IntPtr SelectObject(IntPtr dc,IntPtr bitmap);
-    [DllImport("gdi32.dll")] static extern bool DeleteObject(IntPtr obj);
-    [DllImport("gdi32.dll")] static extern bool DeleteDC(IntPtr dc);
-    [DllImport("user32.dll",SetLastError=true)]
-    static extern bool UpdateLayeredWindow(IntPtr hwnd,IntPtr screen,IntPtr destination,ref Size dimensions,
-        IntPtr source,ref Point origin,uint colorKey,ref AlphaBlend blend,uint flags);
+    [DllImport("user32.dll")] static extern uint GetDpiForWindow(IntPtr hwnd);
+    [StructLayout(LayoutKind.Sequential)] struct DpiRect { public int Left, Top, Right, Bottom; }
 
-    void RefreshPet() {
-        avatar.Invalidate();
-        if (!IsHandleCreated || !Visible || profile == null || IsDisposed) return;
-        using (var frame = PetArtwork.Render(ClientSize.Width,profile.GetColor(),urgent,hovering,eyesClosed,busy,profile.EyeHeight)) {
-            IntPtr screen = GetDC(IntPtr.Zero), memory = CreateCompatibleDC(screen);
-            IntPtr bitmap = frame.GetHbitmap(Color.FromArgb(0)), original = SelectObject(memory,bitmap);
-            try {
-                var dimensions = ClientSize; var origin = Point.Empty;
-                var blend = new AlphaBlend { Opacity=255, Format=1 };
-                if (!UpdateLayeredWindow(Handle,screen,IntPtr.Zero,ref dimensions,memory,ref origin,0,ref blend,2))
-                    Invalidate();
-            } finally {
-                SelectObject(memory,original); DeleteObject(bitmap); DeleteDC(memory); ReleaseDC(IntPtr.Zero,screen);
-            }
+    // Only the layered sprite needs monitor-specific physical pixel coordinates.
+    protected override void CreateHandle() {
+        IntPtr previous=IntPtr.Zero;
+        try {
+            try { previous=SetThreadDpiAwarenessContext(new IntPtr(-4)); }
+            catch(EntryPointNotFoundException) { }
+            base.CreateHandle();
+        } finally { if(previous!=IntPtr.Zero) SetThreadDpiAwarenessContext(previous); }
+    }
+    int PetSizeForDpi(int dpi) { return Math.Max(1,(profile.PetPixels*dpi+48)/96); }
+    int CurrentPetPixels() {
+        if (!IsHandleCreated) return profile.PetPixels;
+        try {
+            uint dpi=GetDpiForWindow(Handle);
+            if (dpi>0) return PetSizeForDpi((int)dpi);
+        } catch(EntryPointNotFoundException) { }
+        using(var g=CreateGraphics()) return PetSizeForDpi((int)Math.Round(g.DpiX));
+    }
+    protected override void WndProc(ref Message m) {
+        if (m.Msg==0x02E0 && profile!=null) { // WM_DPICHANGED
+            int size=PetSizeForDpi(m.WParam.ToInt32() & 0xffff);
+            var bounds=(DpiRect)Marshal.PtrToStructure(m.LParam,typeof(DpiRect));
+            SetBounds(bounds.Left,bounds.Top,size,size);
+            RefreshPet();
+            if (notice.Visible) Place(notice);
+            if (editor.Visible) Place(editor);
+            m.Result=IntPtr.Zero; return;
+        }
+        base.WndProc(ref m);
+    }
+    protected override void OnHandleCreated(EventArgs e) {
+        base.OnHandleCreated(e);
+        if (profile!=null) {
+            int size=CurrentPetPixels();
+            ClientSize=new Size(size,size);
         }
     }
-
+    protected override void OnHandleDestroyed(EventArgs e) {
+        ReleasePetSurface();
+        base.OnHandleDestroyed(e);
+    }
+    void ReleasePetSurface() {
+        if (petSurface==null) return;
+        petSurface.Dispose(); petSurface=null;
+    }
+    void RefreshPet() {
+        if (!avatar.IsDisposed && avatar.Visible) avatar.Invalidate();
+        PaintPetFrame();
+    }
+    EyeExpression CurrentExpression() {
+        if (responseExpression != EyeExpression.Neutral && DateTime.UtcNow < expressionUntil) return responseExpression;
+        if (urgent) return EyeExpression.Confused;
+        if (String.Equals(profile.Character,"Sleepy",StringComparison.OrdinalIgnoreCase)) return EyeExpression.Exhausted;
+        return EyeExpression.Neutral;
+    }
+    EyeExpression DesktopExpression() {
+        if (holdingPet) return EyeExpression.Surprised;
+        if (hovering) return EyeExpression.Happy;
+        return CurrentExpression();
+    }
+    void SetExpression(EyeExpression expression) {
+        responseExpression = expression;
+        expressionUntil = DateTime.UtcNow.AddSeconds(3);
+        RefreshPet();
+    }
+    void PaintPetFrame() {
+        if (!IsHandleCreated || !Visible || profile==null || IsDisposed || ClientSize.Width<1) return;
+        long elapsed=petClock.ElapsedMilliseconds;
+        if (elapsed<nextPetSurfaceAttempt) return;
+        int pixels=ClientSize.Width;
+        try {
+            if (petSurface==null || petSurface.Pixels!=pixels) {
+                ReleasePetSurface(); petSurface=new PetSurface(pixels);
+            }
+            double phase=(elapsed % (profile.BlinkIntervalMs+240) - profile.BlinkIntervalMs)/240.0;
+            int interval = holdingPet || hovering || phase > -.5 ? 15 : 30;
+            if (blink.Interval != interval) blink.Interval = interval;
+            eyesClosed=phase>.3 && phase<.7;
+            if (petSurface.Present(Handle,profile.GetColor(),urgent,hovering,draggingPet,busy,profile.EyeHeight,elapsed/1000.0,phase,DesktopExpression())) return;
+        } catch (System.ComponentModel.Win32Exception) {
+            // A native bitmap or device context may be unavailable until Windows frees resources.
+        } catch (ExternalException) {
+            // Windows may temporarily be unable to provide a presentation bitmap.
+        } catch (OutOfMemoryException) {
+            // GDI+ also reports an exhausted image or DC allocation with this exception.
+        }
+        ReleasePetSurface(); nextPetSurfaceAttempt=elapsed+5000;
+        Invalidate();
+    }
     void BuildDotMenu() {
         var menu = new ContextMenuStrip();
         menu.Items.Add("Open Blink",null,(s,e) => OpenInbox());
         menu.Items.Add("Show pending reminders",null,(s,e) => OpenInbox());
+        menu.Items.Add("Open checklist file",null,(s,e) => {
+            string error;
+            if (!TryOpenChecklist(out error)) MessageBox.Show(error,"Blink checklist",MessageBoxButtons.OK,MessageBoxIcon.Information);
+        });
         banners = new ToolStripMenuItem("Windows notification banners");
         string bannerFile = Path.Combine(dataDirectory,"notification-banners.enabled");
         banners.Checked = File.Exists(bannerFile);
@@ -194,7 +350,7 @@ class ReminderDot : Form {
             } catch (Exception e) { ShowEditor(); Say("I couldn’t save the notification setting. " + e.Message); }
         };
         menu.Items.Add(banners);
-        menu.Items.Add("Customize pet",null,(s,e) => { ShowEditor(); Customize(); });
+        menu.Items.Add("Customize pet",null,(s,e) => Customize());
         var toggle = new ToolStripMenuItem("Hide pet");
         toggle.Click += delegate { TogglePet(); };
         menu.Items.Add(toggle);
@@ -220,14 +376,26 @@ class ReminderDot : Form {
     }
     void OpenInbox(string messageId = null) {
         if (petHidden) TogglePet();
-        editor.Hide(); SyncInbox(messageId ?? (outstanding.Count > 0 ? outstanding[0].MessageId : null));
-        Place(notice); if (!notice.Visible) notice.Show(this);
+        editor.Hide();
+        openingInbox=true;
+        try { SyncInbox(messageId ?? (replyBox.TextLength==0 && outstanding.Count>0 ? outstanding[0].MessageId : null)); }
+        finally { openingInbox=false; }
+        WithPanelDpi(() => { Place(notice); if (!notice.Visible) { notice.Show(); RepaintConversation(); } },true);
         notice.Activate(); if (replyBox.Enabled) replyBox.Focus();
     }
     void ApplyProfile() {
+        theme = profile.GetTheme();
+        renderedTheme=null;
+        ApplyTheme(editor,theme); ApplyTheme(notice,theme);
+        ApplyMenuTheme(ContextMenuStrip,theme);
+        ApplyMenuTheme(tasks.ContextMenuStrip,theme);
+        int start=conversation.SelectionStart, length=conversation.SelectionLength;
+        conversation.SelectAll(); conversation.SelectionColor=theme.Ink;
+        conversation.Select(Math.Min(start,conversation.TextLength),Math.Min(length,conversation.TextLength-Math.Min(start,conversation.TextLength)));
         var anchor = new Point(Right,Bottom);
         var area = Screen.FromControl(this).WorkingArea;
-        ClientSize = new Size(profile.PetPixels,profile.PetPixels);
+        int size = CurrentPetPixels();
+        ClientSize = new Size(size,size);
         Location = Clamp(new Point(anchor.X - Width,anchor.Y - Height),area,Size);
         var oldIcon = trayIcon; var oldWaiting = waitingIcon;
         trayIcon = PetArtwork.TrayIcon(profile.GetColor(),false);
@@ -237,12 +405,50 @@ class ReminderDot : Form {
         petName.Text = profile.Name; noticeName.Text = profile.Name;
         hints.SetToolTip(petName,profile.Name); hints.SetToolTip(noticeName,profile.Name);
         hints.SetToolTip(this,profile.Name + " · click to talk, drag to move");
-        UpdateBadge();
-        blink.Interval = eyesClosed ? 150 : profile.BlinkIntervalMs;
+        UpdateBadge(true);
+
         if (editor.Visible) Place(editor);
         if (notice.Visible) Place(notice);
         RefreshPet();
         if (notice.Visible) RenderNotice();
+    }
+
+    void ApplyTheme(Control control,PetTheme colors) {
+        var button = control as Button;
+        if (button != null) {
+            bool primary = button.Tag is bool && (bool)button.Tag;
+            button.BackColor = primary ? colors.Accent : colors.Soft;
+            button.ForeColor = primary ? colors.OnAccent : colors.Ink;
+            button.FlatAppearance.MouseOverBackColor = primary ? ControlPaint.Dark(colors.Accent,0.08F) : colors.Incoming;
+            button.FlatAppearance.MouseDownBackColor = primary ? ControlPaint.Dark(colors.Accent,0.15F) : colors.Outgoing;
+            if (button==avatar) button.BackColor=colors.Canvas;
+        } else if (!(control is ColorChoice) && !(control is MessageBubble)) {
+            control.ForeColor = control==model || control==messageStatus ? colors.Accent : colors.Ink;
+            if (control==chatRule) control.BackColor = colors.Border;
+            else if (control==composer || control==replyBox) control.BackColor=colors.Soft;
+            else if (control is TextBoxBase || control is ListControl || control==conversation.Parent) control.BackColor=colors.Incoming;
+            else control.BackColor=colors.Canvas;
+        }
+        foreach (Control child in control.Controls) ApplyTheme(child,colors);
+    }
+    sealed class MenuColors : ProfessionalColorTable {
+        readonly PetTheme theme;
+        public MenuColors(PetTheme colors) { theme=colors; }
+        public override Color ToolStripDropDownBackground { get { return theme.Canvas; } }
+        public override Color MenuBorder { get { return theme.Border; } }
+        public override Color MenuItemBorder { get { return theme.Border; } }
+        public override Color MenuItemSelected { get { return theme.Outgoing; } }
+        public override Color ImageMarginGradientBegin { get { return theme.Soft; } }
+        public override Color ImageMarginGradientMiddle { get { return theme.Soft; } }
+        public override Color ImageMarginGradientEnd { get { return theme.Soft; } }
+        public override Color CheckBackground { get { return theme.Outgoing; } }
+        public override Color CheckSelectedBackground { get { return theme.Outgoing; } }
+    }
+    static void ApplyMenuTheme(ContextMenuStrip menu,PetTheme colors) {
+        if (menu==null) return;
+        menu.Renderer=new ToolStripProfessionalRenderer(new MenuColors(colors));
+        menu.BackColor=colors.Canvas; menu.ForeColor=colors.Ink;
+        foreach (ToolStripItem item in menu.Items) item.ForeColor=colors.Ink;
     }
 
     static Point Clamp(Point p, Rectangle bounds, Size size) {
@@ -250,8 +456,11 @@ class ReminderDot : Form {
                          Math.Max(bounds.Top, Math.Min(p.Y,bounds.Bottom-size.Height)));
     }
     void Place(Form f) {
+        WithPanelDpi(() => PlaceOnPetMonitor(f),f == notice);
+    }
+    void PlaceOnPetMonitor(Form f) {
         var area = Screen.FromControl(this).WorkingArea;
-        const int gap = 8;
+        int gap = f == notice ? new ChatGrid(notice.MonitorDpi((int)Math.Round(panelScale*96))).Px(8) : Px(8);
         int alignX = Left + Width/2 < area.Left + area.Width/2 ? Left : Right - f.Width;
         var desired = new Point(alignX,Top - gap - f.Height);
         if (desired.Y < area.Top) {
@@ -261,23 +470,15 @@ class ReminderDot : Form {
         }
         f.Location = Clamp(desired,area,f.Size);
     }
-    static void Surface(Form f, string title, int width, int height) {
+    void Surface(Form f,string title,int width,int height) {
         f.Text = title; f.AccessibleName = title; f.AutoScaleMode = AutoScaleMode.None;
         f.FormBorderStyle = FormBorderStyle.None; f.StartPosition = FormStartPosition.Manual;
-        f.ShowInTaskbar = false; f.TopMost = true; f.BackColor = Paper; f.ForeColor = Ink;
-        f.Font = new Font("Segoe UI",9F); f.ClientSize = new Size(width,height);
-        ShapeToSize(f);
-        f.SizeChanged += delegate { ShapeToSize(f); };
+        f.ShowInTaskbar = false; f.TopMost = true; f.BackColor = theme.Canvas; f.ForeColor = theme.Ink;
+        f.Font = UiFont(9); f.ClientSize = PanelSize(width,height);
         f.Paint += (s,e) => {
-            e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
-            using (var edge = BubbleShape(f.ClientSize.Width,f.ClientSize.Height))
-            using (var pen = new Pen(Color.FromArgb(154,174,164),2)) e.Graphics.DrawPath(pen,edge);
+            using (var pen = new Pen(theme.Border))
+                e.Graphics.DrawRectangle(pen,0,0,f.ClientSize.Width-1,f.ClientSize.Height-1);
         };
-    }
-    static void ShapeToSize(Form f) {
-        using (var edge = BubbleShape(f.ClientSize.Width,f.ClientSize.Height)) {
-            var old = f.Region; f.Region = new Region(edge); if (old != null) old.Dispose();
-        }
     }
     static GraphicsPath BubbleShape(int width,int height) {
         var edge = new GraphicsPath();
@@ -287,38 +488,39 @@ class ReminderDot : Form {
         edge.AddArc(0,height-21,20,20,90,90);
         edge.CloseFigure(); return edge;
     }
-    static Label Caption(Control owner, string words, int x, int y, int w, int h, float size, bool bold) {
-        var label = new Label { Text = words, ForeColor = Ink, Font = new Font("Segoe UI",size,bold ? FontStyle.Bold : FontStyle.Regular), TextAlign = ContentAlignment.MiddleLeft };
-        label.SetBounds(x,y,w,h); owner.Controls.Add(label); return label;
+    Label Caption(Control owner, string words, int x, int y, int w, int h, float size, bool bold) {
+        var label = new Label { Text = words, ForeColor = theme.Ink, Font = UiFont(size,bold ? FontStyle.Bold : FontStyle.Regular), TextAlign = ContentAlignment.MiddleLeft };
+        BoundsInUnits(label,x,y,w,h); owner.Controls.Add(label); return label;
     }
-    static Button ButtonAt(Control owner, string text,int x,int y,int w,int h, Action action,bool primary) {
+    Button ButtonAt(Control owner, string text,int x,int y,int w,int h, Action action,bool primary) {
         var b = new Button { Text = text, AccessibleName = text, FlatStyle = FlatStyle.Flat, Cursor = Cursors.Hand,
-            BackColor = primary ? Teal : Soft, ForeColor = primary ? Color.White : Ink, UseVisualStyleBackColor = false };
-        b.FlatAppearance.BorderSize = 0; b.SetBounds(x,y,w,h); owner.Controls.Add(b);
+            Tag=primary, BackColor = primary ? theme.Accent : theme.Soft, ForeColor = primary ? theme.OnAccent : theme.Ink, UseVisualStyleBackColor = false };
+        b.FlatAppearance.BorderSize = 0; BoundsInUnits(b,x,y,w,h); owner.Controls.Add(b);
         b.Click += delegate { action(); }; return b;
     }
     void ShowEditor() {
         if (petHidden) TogglePet();
         notice.Hide(); Place(editor);
-        if (!editor.Visible) editor.Show(this);
+        if (!editor.Visible) WithPanelDpi(() => editor.Show());
         editor.Activate(); input.Focus();
     }
 
     void BuildEditor() {
         Surface(editor,"Blink",410,433);
         petName = Caption(editor,"Blink",16,7,142,36,17,true); petName.AutoEllipsis = true;
-        model.SetBounds(164,12,166,27); model.Text = "Checking local AI…"; model.TextAlign = ContentAlignment.MiddleLeft;
-        model.ForeColor = Teal; model.AutoEllipsis = true; editor.Controls.Add(model);
+        BoundsInUnits(model,164,12,166,27); model.Text = "Checking local AI…"; model.TextAlign = ContentAlignment.MiddleLeft;
+        model.ForeColor = theme.Accent; model.AutoEllipsis = true; editor.Controls.Add(model);
         model.Cursor = Cursors.Hand; model.Click += async delegate { await CheckModel(); Say(model.Text); };
         ButtonAt(editor,"Hide",340,12,54,26,() => editor.Hide(),false);
-        var chatArea = new Panel { BackColor = Color.White, Padding = new Padding(10,8,10,8) };
-        chatArea.SetBounds(16,54,378,121); editor.Controls.Add(chatArea);
-        conversation.Dock = DockStyle.Fill; conversation.BackColor = Color.White;
-        conversation.ForeColor = Ink; conversation.ReadOnly = true; conversation.AccessibleName = "Conversation";
+        var chatArea = new Panel { BackColor = theme.Incoming, Padding = new Padding(Px(10),Px(8),Px(10),Px(8)) };
+        BoundsInUnits(chatArea,16,54,378,121); editor.Controls.Add(chatArea);
+        editorMotion = new ConversationMotion(editor,chatArea);
+        conversation.Dock = DockStyle.Fill; conversation.BackColor = theme.Incoming;
+        conversation.ForeColor = theme.Ink; conversation.ReadOnly = true; conversation.AccessibleName = "Conversation";
         conversation.BorderStyle = BorderStyle.None; conversation.DetectUrls = false;
-        conversation.Font = new Font("Segoe UI",10); chatArea.Controls.Add(conversation);
+        conversation.Font = UiFont(10); chatArea.Controls.Add(conversation);
         Say(profile.Greeting());
-        input.SetBounds(16,185,306,30); input.Font = new Font("Segoe UI",11); input.MaxLength = 1200;
+        BoundsInUnits(input,16,185,306,30); input.Font = UiFont(11); input.MaxLength = 1200;
         input.AccessibleName = "Message"; editor.Controls.Add(input);
         input.HandleCreated += delegate { SendMessageNative(input.Handle,0x1501,new IntPtr(1),"Message Blink…"); };
         send = ButtonAt(editor,"Send",330,183,64,30,async () => await SendMessage(),true);
@@ -330,7 +532,7 @@ class ReminderDot : Form {
         messagesButton = ButtonAt(editor,"Messages",150,261,112,29,() => OpenInbox(),false);
         ButtonAt(editor,"Customize pet",271,261,123,29,Customize,false);
         tasks.AccessibleName = "Active tasks"; tasks.DisplayMember = "Title";
-        tasks.SetBounds(16,293,378,83); tasks.BackColor = Color.White; tasks.Font = new Font("Segoe UI",10);
+        BoundsInUnits(tasks,16,293,378,83); tasks.BackColor = theme.Incoming; tasks.Font = UiFont(10);
         tasks.IntegralHeight = false; tasks.HorizontalScrollbar = true; editor.Controls.Add(tasks);
         var manage = new ContextMenuStrip();
         manage.Items.Add("Remove task",null,(s,e) => RemoveSelected());
@@ -342,7 +544,7 @@ class ReminderDot : Form {
         tasks.SelectedIndexChanged += delegate {
             if (refreshing) return;
             var t = tasks.SelectedItem as TaskItem;
-            focusId = t == null ? null : t.Id; context = "";
+            focusId = t == null ? null : t.Id;
             if (t != null) Say(Describe(t));
         };
         ButtonAt(editor,"Snooze 10 min",16,388,117,29,() => Quick("snooze",ActiveId()),false);
@@ -359,7 +561,10 @@ class ReminderDot : Form {
     static extern IntPtr SendMessageNative(IntPtr window,int message,IntPtr value,string text);
     async Task CheckModel() {
         try {
-            string state = await Language.ModelStatus();
+            var checking=Language.ModelStatus();
+            string state;
+            using (checking.IsCompleted ? null : editorMotion.BeginBusy(theme,profile.EyeHeight))
+                state=await checking;
             if (editor.IsDisposed) return;
             model.Text = state; hints.SetToolTip(model,state + " · Click to check again.");
         } catch { if (!editor.IsDisposed) model.Text = "Local AI unavailable"; }
@@ -367,21 +572,21 @@ class ReminderDot : Form {
     void Line(string who,string message) {
         if (conversation.TextLength > 18000) conversation.Clear();
         if (conversation.TextLength > 0) conversation.AppendText("\n\n");
-        conversation.SelectionColor = Teal; conversation.AppendText(who + "   ");
-        conversation.SelectionColor = Ink; conversation.AppendText(message);
+        conversation.SelectionColor = theme.Accent; conversation.AppendText(who + "   ");
+        conversation.SelectionColor = theme.Ink; conversation.AppendText(message);
         conversation.SelectionStart = conversation.TextLength; conversation.ScrollToCaret();
     }
     void Say(string text) { Line(profile.Name,text); }
-    TaskItem Get(string id) { return store.Items.FirstOrDefault(t => t.Id == id && t.Stage != "done"); }
+    TaskItem Get(string id) { return store.FindActive(id); }
     string ActiveId() { return focusId; }
     void RemoveSelected() {
         var t = Get(focusId);
         if (t == null || MessageBox.Show(editor,"Remove “" + t.Title + "” and its reminders?","Remove task",MessageBoxButtons.YesNo,MessageBoxIcon.Question) != DialogResult.Yes) return;
-        try { store.Delete(t.Id); RefreshTasks(null); SyncInbox(); context = ""; Say("Removed " + t.Title + "."); }
-        catch(Exception e) { Say("I couldn’t remove that task. " + e.Message); }
+        try { store.Delete(t.Id); RefreshTasks(null); SyncInbox(); Say("Removed " + t.Title + "."); }
+        catch(Exception e) { SetExpression(EyeExpression.Sad); Say("I couldn’t remove that task. " + e.Message); }
     }
     void RefreshTasks(string id) {
-        refreshing = true;
+        refreshing = true; tasks.BeginUpdate();
         try {
             tasks.Items.Clear();
             foreach (var t in store.Items.Where(t=>t.Stage!="done").OrderBy(t=>t.DeadlineUtc ?? t.CheckUtc ?? DateTime.MaxValue)) {
@@ -393,9 +598,9 @@ class ReminderDot : Form {
             taskHeading.Text = count == 0 ? "No active tasks" : "Active tasks  ·  " + count;
             foreach (Control control in editor.Controls)
                 if (control.Top >= tasks.Top) control.Visible = count > 0;
-            editor.ClientSize = new Size(410,count == 0 ? 303 : 433);
+            editor.ClientSize = PanelSize(410,count == 0 ? 303 : 433);
             if (editor.Visible) Place(editor);
-        } finally { refreshing = false; }
+        } finally { tasks.EndUpdate(); refreshing = false; }
     }
     static string Time(DateTime utc) { return utc.ToLocalTime().ToString("ddd d MMM, h:mm tt"); }
     static string Describe(TaskItem t) {
@@ -407,8 +612,8 @@ class ReminderDot : Form {
         return String.Join(" · ",parts);
     }
     bool Persist(TaskItem t) {
-        try { store.Save(t); RefreshTasks(t.Id); return true; }
-        catch(Exception e) { Say("I couldn’t save that change. " + e.Message); ShowEditor(); return false; }
+        try { store.Save(t); RefreshTasks(t.Id); SetExpression(EyeExpression.Happy); return true; }
+        catch(Exception e) { SetExpression(EyeExpression.Sad); Say("I couldn’t save that change. " + e.Message); ShowEditor(); return false; }
     }
     static TaskItem NewItem(string title) {
         return new TaskItem { Id = Guid.NewGuid().ToString("N"), Title = title, File = "", Stage = "working" };
@@ -418,64 +623,124 @@ class ReminderDot : Form {
         t.WarnUtc = deadline.AddMinutes(-30) > DateTime.UtcNow ? (DateTime?)deadline.AddMinutes(-30) : null;
     }
     void TestReminder() {
-        context = "";
         var t = NewItem("Your 10-second test"); t.Id = "test-" + t.Id; t.CheckUtc = DateTime.UtcNow.AddSeconds(10);
         if (Persist(t)) Say("Test set. Hide this bubble and I’ll message you in 10 seconds.");
+    }
+
+    sealed class ColorChoice : RadioButton {
+        readonly PetTheme palette;
+        public ColorChoice(string name,PetTheme colors) {
+            Text=name; AccessibleName=name; palette=colors;
+            AutoSize=false; Appearance=Appearance.Button; FlatStyle=FlatStyle.Flat;
+            Cursor=Cursors.Hand; Font=UiFont(8);
+            SetStyle(ControlStyles.UserPaint|ControlStyles.AllPaintingInWmPaint|ControlStyles.OptimizedDoubleBuffer,true);
+        }
+        protected override void OnPaint(PaintEventArgs e) {
+            var g=e.Graphics; g.SmoothingMode=SmoothingMode.AntiAlias; g.Clear(Parent==null ? BackColor : Parent.BackColor);
+            using (var shape=BubbleShape(Width,Height))
+            using (var fill=new SolidBrush(Checked ? palette.Outgoing : palette.Soft))
+            using (var edge=new Pen(Checked ? palette.Accent : palette.Border,Checked?Px(2):1)) {
+                g.FillPath(fill,shape); g.DrawPath(edge,shape);
+            }
+            int side=Math.Min(Px(31),Height/2);
+            PetArtwork.Draw(g,new Rectangle((Width-side)/2,Px(6),side,side),palette.Coat,false,false,false,false,13);
+            if (Checked) using (var mark=new Pen(palette.Accent,Math.Max(1,Px(2)))) {
+                g.DrawLines(mark,new[]{ new Point(Width-Px(13),Px(9)),new Point(Width-Px(10),Px(12)),new Point(Width-Px(5),Px(6)) });
+            }
+            var caption=new Rectangle(Px(2),Px(37),Width-Px(4),Height-Px(38));
+            TextRenderer.DrawText(g,Text,Font,caption,palette.Ink,TextFormatFlags.HorizontalCenter|TextFormatFlags.VerticalCenter|TextFormatFlags.WordBreak|TextFormatFlags.NoPrefix);
+            if (Focused && ShowFocusCues) ControlPaint.DrawFocusRectangle(g,new Rectangle(3,3,Width-6,Height-6));
+        }
     }
     void Customize() {
         using (var dialog = new Form()) {
             dialog.Text = "Customize pet"; dialog.AccessibleName = dialog.Text;
-            dialog.Font = editor.Font; dialog.StartPosition = FormStartPosition.CenterParent;
-            dialog.FormBorderStyle = FormBorderStyle.FixedDialog; dialog.BackColor = Paper;
+            Form owner=notice.Visible ? notice : editor.Visible ? editor : Visible ? this : null;
+            dialog.AutoScaleMode = AutoScaleMode.None; dialog.Font = editor.Font;
+            dialog.StartPosition = owner==null || owner==this ? FormStartPosition.CenterScreen : FormStartPosition.CenterParent;
+            dialog.FormBorderStyle = FormBorderStyle.FixedDialog; dialog.BackColor = theme.Canvas;
             dialog.ShowInTaskbar = false; dialog.MaximizeBox = false; dialog.MinimizeBox = false;
-            dialog.TopMost = true; dialog.ClientSize = new Size(357,389);
+            dialog.TopMost = true; dialog.ClientSize = PanelSize(357,487);
             Caption(dialog,"Pet name",16,9,320,20,10,true);
             var name = new TextBox { AccessibleName = "Pet name", Text = profile.Name, MaxLength = 32 };
-            name.SetBounds(16,32,325,26); dialog.Controls.Add(name);
+            BoundsInUnits(name,16,32,325,26); dialog.Controls.Add(name);
             Caption(dialog,"Characteristic",16,66,320,20,10,true);
             var trait = new ComboBox { AccessibleName = "Characteristic", MaxLength = 160 };
             trait.Items.AddRange(new string[] { "Curious","Sleepy","Energetic" });
-            trait.Text = profile.Character; trait.SetBounds(16,90,325,27); dialog.Controls.Add(trait);
+            trait.Text = profile.Character; BoundsInUnits(trait,16,90,325,27); dialog.Controls.Add(trait);
             Caption(dialog,"Personality",16,127,320,20,10,true);
             var tone = Choose(dialog,"Personality",150,PetProfile.Personalities,profile.Personality);
-            Caption(dialog,"Appearance",16,187,320,20,10,true);
-            var color = Choose(dialog,"Appearance",210,PetProfile.Appearances,profile.Appearance);
-            Caption(dialog,"Pet size",16,246,320,20,10,true);
-            var petSize = Choose(dialog,"Pet size",269,PetProfile.Sizes,profile.SizeChoice);
-            var error = Caption(dialog,"",16,299,325,33,9,false);
-            var cancel = ButtonAt(dialog,"Cancel",145,341,90,32,() => dialog.Close(),false);
+            Caption(dialog,"Pet and chat color",16,187,320,20,10,true);
+            var choices = new Panel { AccessibleName="Appearance" }; BoundsInUnits(choices,16,211,325,68); dialog.Controls.Add(choices);
+            var preview = new Panel { AccessibleName="Chat color preview" }; BoundsInUnits(preview,16,288,325,52); dialog.Controls.Add(preview);
+            var samplePet=Caption(preview,"How’s the report going?",8,6,165,28,9,false);
+            var sampleUser=Caption(preview,"Still working",201,18,113,27,9,false);
+            samplePet.TextAlign=sampleUser.TextAlign=ContentAlignment.MiddleCenter;
+            var previewMotion=new ConversationMotion(dialog,preview);
+            var previewTheme=theme;
+            Action<PetTheme> showPreview = colors => {
+                ApplyTheme(dialog,colors);
+                preview.BackColor=colors.Canvas; samplePet.BackColor=colors.Incoming; sampleUser.BackColor=colors.Outgoing;
+                samplePet.ForeColor=sampleUser.ForeColor=colors.Ink; choices.Invalidate(true);
+                if (dialog.Visible && previewTheme!=colors) previewMotion.Transition(previewTheme,colors,profile.EyeHeight);
+                previewTheme=colors;
+            };
+            string selectedColor=profile.Appearance;
+            for (int i=0;i<PetProfile.Appearances.Length;i++) {
+                string colorName=PetProfile.Appearances[i];
+                var candidate=profile.Copy(); candidate.Appearance=colorName;
+                var colors=candidate.GetTheme();
+                var option=new ColorChoice(colorName,colors);
+                BoundsInUnits(option,i*66,0,61,68); choices.Controls.Add(option);
+                option.Checked=colorName==selectedColor;
+                option.CheckedChanged+=delegate { if (option.Checked) { selectedColor=colorName; showPreview(colors); } };
+            }
+            Caption(dialog,"Pet size",16,347,320,20,10,true);
+            var petSize = Choose(dialog,"Pet size",370,PetProfile.Sizes,profile.SizeChoice);
+            var error = Caption(dialog,"",16,401,325,32,9,false);
+            var cancel = ButtonAt(dialog,"Cancel",145,437,90,32,() => dialog.Close(),false);
             dialog.CancelButton = cancel;
-            dialog.AcceptButton = ButtonAt(dialog,"Save",244,341,97,32,() => {
+            var originalTheme=theme;
+            bool saved=false;
+            dialog.AcceptButton = ButtonAt(dialog,"Save",244,437,97,32,() => {
                 if (String.IsNullOrWhiteSpace(name.Text)) { error.Text = "Give your pet a name."; name.Focus(); return; }
                 var updated = profile.Copy();
                 updated.Name = name.Text.Trim(); updated.Character = trait.Text.Trim();
-                updated.Personality = (string)tone.SelectedItem; updated.Appearance = (string)color.SelectedItem;
+                updated.Personality = (string)tone.SelectedItem; updated.Appearance = selectedColor;
                 updated.SizeChoice = (string)petSize.SelectedItem;
                 try {
                     updated.Save(dataDirectory); profile = updated; ApplyProfile();
-                    Say(profile.Greeting()); dialog.Close();
-                } catch(Exception e) { error.Text = e.Message; }
+                    saved=true; dialog.Close();
+                } catch(Exception e) { SetExpression(EyeExpression.Sad); error.Text = e.Message; }
             },true);
-            dialog.ShowDialog(editor);
+            showPreview(theme);
+            WithPanelDpi(() => { if (owner==null) dialog.ShowDialog(); else dialog.ShowDialog(owner); });
+            if (owner==notice && notice.Visible && replyBox.Enabled && replyBox.TextLength>0) replyBox.Focus();
+            if (owner==editor && editor.Visible && input.Enabled && input.TextLength>0) input.Focus();
+            if (saved && originalTheme!=theme) {
+                if (owner==this && Visible && !petHidden && !notice.Visible && !editor.Visible) OpenInbox();
+                if (notice.Visible) chatMotion.Transition(originalTheme,theme,profile.EyeHeight);
+                else if (editor.Visible) editorMotion.Transition(originalTheme,theme,profile.EyeHeight);
+            }
         }
     }
     static ComboBox Choose(Form owner,string label,int y,string[] values,string selected) {
         var box = new ComboBox { AccessibleName = label, DropDownStyle = ComboBoxStyle.DropDownList };
-        box.Items.AddRange(values); box.SelectedItem = selected; box.SetBounds(16,y,325,27);
+        box.Items.AddRange(values); box.SelectedItem = selected; BoundsInUnits(box,16,y,325,27);
         owner.Controls.Add(box); return box;
     }
     void Manual() {
         using(var dialog = new Form()) {
             dialog.Text = "Set a reminder"; dialog.StartPosition = FormStartPosition.CenterParent;
-            dialog.Font = editor.Font; dialog.BackColor = Paper; dialog.ForeColor = Ink;
+            dialog.AutoScaleMode = AutoScaleMode.None; dialog.Font = editor.Font; dialog.BackColor = theme.Canvas; dialog.ForeColor = theme.Ink;
             dialog.FormBorderStyle = FormBorderStyle.FixedDialog; dialog.TopMost = true;
-            dialog.MinimizeBox = false; dialog.MaximizeBox = false; dialog.ClientSize = new Size(365,265);
+            dialog.MinimizeBox = false; dialog.MaximizeBox = false; dialog.ClientSize = PanelSize(365,265);
             Caption(dialog,"Task",14,9,318,22,10,true);
             var name = new TextBox { Text = input.Text.Trim(), AccessibleName = "Task", MaxLength = 500 };
-            name.SetBounds(14,37,337,25); dialog.Controls.Add(name);
+            BoundsInUnits(name,14,37,337,25); dialog.Controls.Add(name);
             var check = DateField(dialog,"Check-in",77,DateTime.Now.AddMinutes(10),true);
             var due = DateField(dialog,"Deadline",114,DateTime.Now.AddDays(1),false);
-            var upload = new CheckBox { Text = "This requires a submission" }; upload.SetBounds(14,154,330,26); dialog.Controls.Add(upload);
+            var upload = new CheckBox { Text = "This requires a submission" }; BoundsInUnits(upload,14,154,330,26); dialog.Controls.Add(upload);
             var error = Caption(dialog,"",14,181,335,34,9,false);
             ButtonAt(dialog,"Save reminder",194,220,156,31,() => {
                 var t = NewItem(name.Text.Trim());
@@ -484,71 +749,171 @@ class ReminderDot : Form {
                 t.Submission = upload.Checked;
                 if (check.Checked) t.CheckUtc = check.Value.ToUniversalTime();
                 if (due.Checked) SetDeadline(t,due.Value.ToUniversalTime());
-                if (Persist(t)) { context = ""; input.Clear(); Say("Saved. " + Describe(t)); dialog.Close(); }
+                if (Persist(t)) { input.Clear(); Say("Saved. " + Describe(t)); dialog.Close(); }
             },true);
-            dialog.ShowDialog(editor);
+            ApplyTheme(dialog,theme);
+            WithPanelDpi(() => dialog.ShowDialog(editor));
         }
     }
-    static DateTimePicker DateField(Form parent,string name,int y,DateTime time,bool enabled) {
+    DateTimePicker DateField(Form parent,string name,int y,DateTime time,bool enabled) {
         Caption(parent,name,14,y,78,26,9,false);
         var picker = new DateTimePicker { Format = DateTimePickerFormat.Custom, CustomFormat = "ddd dd MMM yyyy   HH:mm:ss", Value = time, ShowCheckBox = true, Checked = enabled, AccessibleName = name };
-        picker.SetBounds(96,y,255,28); parent.Controls.Add(picker); return picker;
+        BoundsInUnits(picker,96,y,255,28); parent.Controls.Add(picker); return picker;
     }
-    async Task SendMessage(string typed = null,ConversationChoice chat = null) {
-        string words = typed ?? input.Text.Trim(); if (busy || words.Length == 0) return;
-        string selection = chat == null || chat.TaskId == GlobalChat ? focusId : chat.TaskId;
-        string thread = context;
-        if (chat != null) { questions.TryGetValue(chat.MessageId,out thread); thread = thread ?? ""; }
-        Action<string> respond = answer => {
-            Say(answer);
-            store.Chat(chat == null ? GlobalChat : chat.MessageId,chat == null ? GlobalChat : chat.TaskId,words,answer);
-        };
-        busy = true; send.Enabled = false; RefreshPet();
-        if (chat == null) input.Clear();
-        Line("You",words);
+    bool TryOpenChecklist(out string error) {
         try {
-            var command = await Language.Read(words,DateTime.Now,store.Items.Where(t => t.Stage != "done").ToList(),Get(selection),thread,profile);
-            if (editor.IsDisposed) return;
-            if (command == null) { respond("I couldn’t read that request. You can also choose Set manually."); return; }
-            if (command.Action == "ask") {
-                string next = (thread.Length > 0 ? thread + "\n" : "") + "User: " + words + "\nBlink: " + (command.ContextReply ?? command.Reply);
-                if (chat == null) context = next; else questions[chat.MessageId] = next;
-                respond(command.Reply); return;
+            store.RefreshChecklist();
+            using (var viewer = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(store.ChecklistPath) { UseShellExecute=true })) { }
+            error=null; return true;
+        } catch(Exception e) {
+            error="I couldn’t open the checklist at "+store.ChecklistPath+". "+e.Message;
+            return false;
+        }
+    }
+    static bool ChecklistOpenRequest(string words) {
+        return Regex.IsMatch(words,@"^\s*(?:(?:can|could|would) you\s+)?(?:please\s+)?open\s+(?:(?:my|the|blink)\s+)?check\s*list(?:\s+file)?[.!?]?\s*$",RegexOptions.IgnoreCase);
+    }
+    ChatPrompt ReadQuestion(string messageId) {
+        var saved = store.Question(messageId);
+        if (saved != null) return saved;
+        // Older builds saved the visible exchange without its canonical question.
+        var tail = historySnapshot.AsEnumerable().Reverse().Where(e=>e.MessageId==messageId).Take(2).ToArray();
+        if (tail.Length == 2 && tail[0].FromPet && !tail[1].FromPet &&
+            Regex.IsMatch(tail[0].Text,@"^(?:Which date do you mean|That time has passed|What future date|What time on |Do you mean |Which task do you mean\?|Did you submit )",RegexOptions.IgnoreCase))
+            return new ChatPrompt { Context="User: "+tail[1].Text+"\nBlink: "+tail[0].Text };
+        return null;
+    }
+    static bool LooksLikeReplyAction(string words) {
+        return Regex.IsMatch(words,@"\b(snooze|remind|check again|check in|later|finished|finish|submitted|submit|uploaded|upload|done|completed|draft|exported|working|reschedule|postpone|move|mark|cancel|rename)\b",RegexOptions.IgnoreCase);
+    }
+    async Task<bool> SendMessage(string typed = null,ConversationChoice chat = null) {
+        string words = (typed ?? input.Text).Trim();
+        if (busy || words.Length == 0) return false;
+        var target = chat ?? new ConversationChoice { MessageId=GlobalChat,TaskId=GlobalChat };
+        string messageId = target.MessageId;
+        bool newRequest = Language.IsNewRequest(words);
+        var saved = newRequest ? null : ReadQuestion(messageId);
+        string thread = saved == null ? "" : saved.Context;
+        string selection = saved != null && saved.SelectedTaskId != null ? saved.SelectedTaskId :
+            target.TaskId == GlobalChat ? focusId : target.TaskId;
+        var current = Get(selection);
+        busy = true; send.Enabled = false; RefreshPet();
+        try {
+            if (ChecklistOpenRequest(words)) {
+                string error;
+                string result=TryOpenChecklist(out error)?"Opened your checklist at "+store.ChecklistPath+".":error;
+                store.Chat(messageId,target.TaskId,words,result); Line("You",words); Say(result); SyncInbox(messageId);
+                if (chat==null) input.Clear(); return true;
             }
-            if (chat == null) context = ""; else questions.Remove(chat.MessageId);
-            if (command.Action == "list") { respond(command.Reply); return; }
-            if (command.Action == "triage") {
-                var t = Get(command.Id) ?? store.Items.Where(x=>x.Stage!="done").OrderBy(x=>x.DeadlineUtc ?? x.CheckUtc ?? DateTime.MaxValue).FirstOrDefault();
-                if (t == null) respond("You have no active tasks.");
-                else { RefreshTasks(t.Id); respond("Start with " + t.Title + ". " + (t.DeadlineUtc.HasValue ? "It’s due " + Time(t.DeadlineUtc.Value) + "." : t.CheckUtc.HasValue ? "Your check-in is " + Time(t.CheckUtc.Value) + "." : "It’s an open task.")); }
-                return;
+            Intent command = Language.ReminderListQuery(words,DateTime.Now,store.Items);
+            if (command == null && target.Pending && saved == null && !newRequest && !LooksLikeReplyAction(words)) {
+                var pet = historySnapshot.LastOrDefault(e=>e.MessageId==messageId && e.FromPet);
+                bool submitted = current != null && current.Submission && pet != null &&
+                    Regex.IsMatch(words,@"^(?:yes|yep|yeah)[.!]?$",RegexOptions.IgnoreCase) &&
+                    Regex.IsMatch(pet.Text,@"(?:have you submitted|did you (?:manage to )?submit|did (?:the|your) upload go through)",RegexOptions.IgnoreCase);
+                command = new Intent {Action=submitted?"submitted":"ack",Id=target.TaskId};
             }
-            bool creating = command.Action == "create";
-            var task = creating ? NewItem(command.Title) : Get(command.Id ?? selection);
-            if (task == null) { respond("Which active task do you mean? Select it below and try again."); return; }
-            if (command.Action == "working") { RefreshTasks(task.Id); SyncInbox(); respond("You’re still working on " + task.Title + "."); return; }
-            if (command.Action == "draft" || command.Action == "done" || command.Action == "submitted") {
-                Quick(command.Action,task.Id,respond); return;
+            if (command == null) {
+                string request = words;
+                if (saved!=null && Regex.IsMatch(thread,@"^User: (?:snooze|check (?:in )?again|remind me again)",RegexOptions.IgnoreCase) &&
+                    Regex.IsMatch(words,@"^(?:in )?(?:an?|one|\d+) (?:min(?:ute)?s?|hours?|days?)\.?$",RegexOptions.IgnoreCase))
+                    request = "Snooze " + words;
+                var reading = Language.Read(request,DateTime.Now,store.Items.Where(t=>t.Stage!="done").ToList(),current,thread,profile);
+                if (reading.IsCompleted) command = await reading;
+                else using (chatMotion.BeginBusy(theme,profile.EyeHeight))
+                    using (editorMotion.BeginBusy(theme,profile.EyeHeight)) command = await reading;
             }
-            if (!creating && command.Action != "edit" && command.Action != "snooze") { respond(command.Reply ?? "What would you like to change?"); return; }
-            if (String.IsNullOrWhiteSpace(task.Title)) { respond("What should I call this task?"); return; }
-            if ((command.CheckUtc.HasValue && command.CheckUtc <= DateTime.UtcNow) || (command.DeadlineUtc.HasValue && command.DeadlineUtc <= DateTime.UtcNow)) {
-                respond("That time has passed. What future time should I use?"); return;
+            if (editor.IsDisposed || notice.IsDisposed) return false;
+            if (command == null) command = new Intent { Action="ask",Reply="What task and time should I use?" };
+            bool applied = CommitCommand(target,words,command,selection,thread);
+            if (applied && chat == null) input.Clear();
+            return applied;
+        } catch (Exception) {
+            if (!editor.IsDisposed) {
+                SetExpression(EyeExpression.Sad);
+                messageStatus.Text="I couldn’t save that change. Your message is still here.";
+                if (chat==null) Say(messageStatus.Text);
             }
-            if (command.Action == "snooze" && !command.CheckUtc.HasValue) { respond("When should I check in again?"); return; }
-            if (command.DeadlineUtc.HasValue && command.Action != "snooze") SetDeadline(task,command.DeadlineUtc.Value);
-            if (command.CheckUtc.HasValue) task.CheckUtc = command.CheckUtc;
-            if (command.Action != "snooze") {
-                if (!String.IsNullOrWhiteSpace(command.Title)) task.Title = command.Title;
-                if (!String.IsNullOrWhiteSpace(command.File)) task.File = command.File;
-                task.Submission |= command.Submission;
+            return false;
+        } finally { if (!editor.IsDisposed) { busy=false; send.Enabled=true; RefreshPet(); } }
+    }
+    bool CommitCommand(ConversationChoice conversation,string words,Intent command,string selection,string previous) {
+        string id = conversation.MessageId;
+        string reply = command.Reply;
+        var task = command.Action=="create" ? NewItem(command.Title) : Get(command.Id ?? selection);
+        bool answer = conversation.Pending && task!=null && task.Id==conversation.TaskId;
+        TaskItem change = null;
+        ChatPrompt question = null;
+        if (command.Action=="triage") {
+            task = task ?? store.Items.Where(x=>x.Stage!="done").OrderBy(x=>x.DeadlineUtc ?? x.CheckUtc ?? DateTime.MaxValue).FirstOrDefault();
+            reply = task==null ? "You have no active tasks." : "Start with "+task.Title+". "+
+                (task.DeadlineUtc.HasValue ? "It’s due "+Time(task.DeadlineUtc.Value)+"." : task.CheckUtc.HasValue ? "Your check-in is "+Time(task.CheckUtc.Value)+"." : "It’s an open task.");
+            answer=false;
+        } else if (command.Action=="list") {
+            answer=false;
+        } else if (command.Action!="ask") {
+            if (task==null) { command.Action="ask"; reply="Which active task do you mean?"; }
+            else if (command.Action=="done" && task.Submission) {
+                command.Action="ask"; reply="Did you submit "+task.Title+"? Reply “I submitted it” once the upload is complete.";
+            } else if (command.CheckUtc<=DateTime.UtcNow || command.DeadlineUtc<=DateTime.UtcNow) {
+                command.Action="ask"; reply="That time has passed. What future date and time should I use?";
+            } else {
+                switch(command.Action) {
+                    case "working":
+                    case "ack":
+                        reply=command.Action=="working" ? "You’re still working on "+task.Title+"." : "Got it.";
+                        if (answer && task.Id.StartsWith("test-")) { task.Stage="done"; change=task; }
+                        break;
+                    case "draft":
+                        task.Stage="draft ready"; task.CheckUtc=null; change=task;
+                        reply=task.Submission?"Draft ready. I’ll keep the upload deadline on your list.":"I’ve marked the draft ready."; break;
+                    case "submitted":
+                    case "done":
+                        task.Stage="done"; task.CheckUtc=null; task.WarnUtc=null; change=task;
+                        reply=(task.Submission?"Marked submitted: ":"Completed: ")+task.Title+"."; break;
+                    case "cancel":
+                        task.Stage="done"; task.CheckUtc=null; task.WarnUtc=null; task.DeadlineUtc=null; change=task;
+                        reply="Canceled “"+task.Title+"” and its pending reminders."; break;
+                    case "rename":
+                        if (String.IsNullOrWhiteSpace(command.Title)) { command.Action="ask"; reply="What new title should I use?"; break; }
+                        task.Title=command.Title.Trim(); change=task; reply="Renamed the task to “"+task.Title+"”."; break;
+                    case "create":
+                    case "edit":
+                    case "snooze":
+                        if (command.Action=="snooze" && !command.CheckUtc.HasValue) { command.Action="ask"; reply="When should I check in again?"; break; }
+                        if (command.DeadlineUtc.HasValue && command.Action!="snooze") SetDeadline(task,command.DeadlineUtc.Value);
+                        if (command.CheckUtc.HasValue) task.CheckUtc=command.CheckUtc;
+                        if (command.Action!="snooze") {
+                            if (!String.IsNullOrWhiteSpace(command.Title)) task.Title=command.Title;
+                            if (!String.IsNullOrWhiteSpace(command.File)) task.File=command.File;
+                            task.Submission |= command.Submission;
+                        }
+                        if (String.IsNullOrWhiteSpace(task.Title)) { command.Action="ask"; reply="What should I call the task?"; break; }
+                        change=task;
+                        reply=command.Action=="snooze" ? "I’ll message you again at "+Time(task.CheckUtc.Value)+"." :
+                            !task.CheckUtc.HasValue && !task.DeadlineUtc.HasValue ? "Added “"+task.Title+"” to your task list." : "Saved. "+Describe(task);
+                        break;
+                    default:
+                        command.Action="ask"; reply="Which task should I add or change?"; break;
+                }
             }
-            if (Persist(task)) {
-                SyncInbox();
-                respond("Saved. " + Describe(task));
-            }
-        } catch(Exception) { if (!editor.IsDisposed) messageStatus.Text = "I couldn’t process or save that message."; if (chat==null) Say("I couldn’t process that request. Try a simpler time or choose Set manually."); }
-        finally { if (!editor.IsDisposed) { busy = false; send.Enabled = true; RefreshPet(); } }
+        }
+        if (command.Action=="ask") {
+            answer=false;
+            if (String.IsNullOrWhiteSpace(reply)) reply="What should I use for this reminder?";
+            question = new ChatPrompt {
+                Context=(String.IsNullOrWhiteSpace(previous)?"":previous+"\n")+"User: "+words+"\nBlink: "+(command.ContextReply ?? reply),
+                SelectedTaskId=command.Id ?? selection
+            };
+        }
+        if (answer) {
+            if (!store.Answer(id,words,change,reply)) { SyncInbox(); return false; }
+        } else store.CommitChat(id,conversation.TaskId,words,reply,change,question);
+        if (question!=null) SetExpression(EyeExpression.Confused);
+        else if (command.Action=="done" || command.Action=="submitted" || command.Action=="create") SetExpression(EyeExpression.Happy);
+        Line("You",words); Say(reply);
+        if (change!=null || selection!=focusId) RefreshTasks(change==null ? selection : change.Id);
+        SyncInbox(id); return true;
     }
     void Quick(string action,string id,Action<string> respond = null) {
         respond = respond ?? Say;
@@ -573,7 +938,7 @@ class ReminderDot : Form {
                 break;
             default: return;
         }
-        if (Persist(t)) { context = ""; SyncInbox(); respond(reply); }
+        if (Persist(t)) { SyncInbox(); respond(reply); }
     }
     sealed class ConversationChoice {
         public string MessageId, TaskId, Label;
@@ -584,34 +949,37 @@ class ReminderDot : Form {
 
     void BuildNotice() {
         Surface(notice,"Blink messages",388,418);
-        notice.BackColor = Color.FromArgb(251,252,248);
-        avatar.SetBounds(14,12,38,38); avatar.BackColor = notice.BackColor; notice.Controls.Add(avatar);
-        avatar.Paint += (s,e) => PetArtwork.Draw(e.Graphics,avatar.ClientRectangle,profile.GetColor(),urgent,false,eyesClosed,false,profile.EyeHeight);
+        notice.BackColor = theme.Canvas;
+        BoundsInUnits(avatar,14,12,38,38); avatar.BackColor = notice.BackColor; notice.Controls.Add(avatar);
+        avatar.FlatStyle=FlatStyle.Flat; avatar.FlatAppearance.BorderSize=0; avatar.UseVisualStyleBackColor=false;
+        avatar.AccessibleName="Customize pet"; avatar.Cursor=Cursors.Hand;
+        hints.SetToolTip(avatar,"Customize pet"); avatar.Click+=(s,e)=>Customize();
+        avatar.Paint += (s,e) => PetArtwork.Draw(e.Graphics,avatar.ClientRectangle,profile.GetColor(),urgent,false,false,false,profile.EyeHeight,CurrentExpression());
         noticeName = Caption(notice,profile.Name,61,8,255,28,14,true);
         noticeName.AutoEllipsis = true;
         closeChat = ButtonAt(notice,"×",344,13,30,30,() => notice.Hide(),false);
-        closeChat.AccessibleName = "Close conversation"; closeChat.Font = new Font("Segoe UI",15);
-        closeChat.BackColor = Color.FromArgb(238,242,235); RoundControl(closeChat);
+        closeChat.AccessibleName = "Close conversation"; closeChat.Font = UiFont(15);
+        closeChat.BackColor = theme.Soft;
         hints.SetToolTip(closeChat,"Close conversation (Esc)");
-        messageStatus.SetBounds(62,35,267,19); messageStatus.ForeColor = Teal;
-        messageStatus.Font = new Font("Segoe UI",8.5F);
+        BoundsInUnits(messageStatus,62,35,267,19); messageStatus.ForeColor = theme.Accent;
+        messageStatus.Font = UiFont(8.5F);
         messageStatus.AutoEllipsis = true; notice.Controls.Add(messageStatus);
-        var rule = new Panel { BackColor = Color.FromArgb(224,231,221) };
-        rule.SetBounds(1,63,386,1); notice.Controls.Add(rule);
+        chatRule.BackColor = theme.Border;
+        BoundsInUnits(chatRule,1,63,386,1); notice.Controls.Add(chatRule);
         upcoming = ButtonAt(notice,"Upcoming",181,74,81,26,ShowUpcoming,false);
         newReminder = ButtonAt(notice,"New reminder",269,74,104,26,ShowEditor,false);
-        RoundControl(upcoming); RoundControl(newReminder);
         eventList.DropDownStyle = ComboBoxStyle.DropDownList;
-        eventList.FlatStyle = FlatStyle.Flat; eventList.BackColor = notice.BackColor;
-        eventList.AccessibleName = "Messages"; eventList.SetBounds(14,75,158,26);
+        eventList.FlatStyle = FlatStyle.Standard; eventList.BackColor = notice.BackColor;
+        eventList.AccessibleName = "Messages"; BoundsInUnits(eventList,14,75,158,26);
         notice.Controls.Add(eventList);
         eventList.SelectedIndexChanged += delegate {
             if (rebuilding) return;
-            replyBox.Clear(); RenderNotice();
+            SelectDraft(SelectedConversation); RenderNotice();
         };
-        messageThread.SetBounds(10,110,368,220); messageThread.AutoScroll = true;
+        BoundsInUnits(messageThread,10,110,368,220); messageThread.AutoScroll = true;
         messageThread.AccessibleName = "Message thread";
         messageThread.BackColor = notice.BackColor; notice.Controls.Add(messageThread);
+        chatMotion = new ConversationMotion(notice,messageThread);
 
         acknowledge = ButtonAt(notice,"Still working",16,336,106,29,() => AnswerQuick("working","Still working"),false);
         snoozeReply = ButtonAt(notice,"Snooze 10 min",129,336,118,29,() => AnswerQuick("snooze","Snooze 10 min"),false);
@@ -620,17 +988,15 @@ class ReminderDot : Form {
             var t = current == null ? null : Get(current.TaskId);
             if (t != null) AnswerQuick(t.Submission ? "submitted" : "done",t.Submission ? "I submitted it" : "Done");
         },false);
-        RoundControl(acknowledge); RoundControl(snoozeReply); RoundControl(finish);
-        composer.SetBounds(12,362,364,44);
-        composer.BackColor = Color.FromArgb(238,242,234); RoundControl(composer); notice.Controls.Add(composer);
-        replyBox.Font = new Font("Segoe UI",10.5F); replyBox.BorderStyle = BorderStyle.None;
-        replyBox.BackColor = composer.BackColor; replyBox.ForeColor = Ink;
-        replyBox.SetBounds(12,12,285,24);
+        BoundsInUnits(composer,12,362,364,44);
+        composer.BackColor = theme.Soft; notice.Controls.Add(composer);
+        replyBox.Font = UiFont(10.5F); replyBox.BorderStyle = BorderStyle.None;
+        replyBox.BackColor = composer.BackColor; replyBox.ForeColor = theme.Ink;
+        BoundsInUnits(replyBox,12,12,285,24);
         replyBox.MaxLength = 1200; replyBox.AccessibleName = "Reply"; composer.Controls.Add(replyBox);
         replyBox.HandleCreated += delegate { SendMessageNative(replyBox.Handle,0x1501,new IntPtr(1),"Write a reply…"); };
         sendReply = ButtonAt(composer,"↑",325,6,32,32,async () => await SendThreadReply(),true);
-        sendReply.AccessibleName = "Send reply"; sendReply.Font = new Font("Segoe UI",13,FontStyle.Bold);
-        RoundControl(sendReply); hints.SetToolTip(sendReply,"Send reply (Enter)");
+        sendReply.AccessibleName = "Send reply"; sendReply.Font = UiFont(13,FontStyle.Bold); hints.SetToolTip(sendReply,"Send reply (Enter)");
         replyBox.KeyDown += async (s,e) => {
             if (e.KeyCode == Keys.Enter) { e.SuppressKeyPress = true; await SendThreadReply(); }
         };
@@ -640,31 +1006,64 @@ class ReminderDot : Form {
             if (!quitting && e.CloseReason == CloseReason.UserClosing) { e.Cancel = true; notice.Hide(); }
         };
     }
-    static void RoundControl(Control control) {
-        using (var edge = BubbleShape(control.Width,control.Height)) {
-            var old = control.Region; control.Region = new Region(edge); if (old != null) old.Dispose();
+    struct ChatGrid {
+        public readonly int Dpi;
+        public ChatGrid(int dpi) { Dpi = dpi; }
+        public int Px(int units) { return (int)Math.Round(units*Dpi/96.0); }
+        public int Units(int pixels) { return (int)Math.Round(pixels*96.0/Dpi); }
+        public void Place(Control target,int x,int y,int width,int height) {
+            target.SetBounds(Px(x),Px(y),Px(x+width)-Px(x),Px(y+height)-Px(y));
         }
     }
-    void SizeConversation(int messages,bool actions) {
+    int lastChatDpi;
+    bool lastActions;
+    bool SizeConversation(int messages,bool actions,ChatGrid grid) {
+        bool dpiChanged=lastChatDpi!=grid.Dpi;
+        if (dpiChanged) {
+            lastChatDpi = grid.Dpi;
+            notice.Font = UiFont(9,FontStyle.Regular,grid.Dpi);
+            noticeName.Font = UiFont(14,FontStyle.Bold,grid.Dpi);
+            messageStatus.Font = UiFont(8.5f,FontStyle.Regular,grid.Dpi);
+            closeChat.Font = UiFont(12,FontStyle.Regular,grid.Dpi);
+            replyBox.Font = UiFont(10.5f,FontStyle.Regular,grid.Dpi);
+            sendReply.Font = UiFont(13,FontStyle.Bold,grid.Dpi);
+        }
         var area = Screen.FromControl(this).WorkingArea;
-        int width = Math.Min(388,Math.Max(318,area.Width-12));
-        int height = Math.Min(Math.Max(260,area.Height-12),messages == 0 ? 268 : messages == 1 ? 321 : 418);
-        if (actions && messages <= 1) height = Math.Min(area.Height-12,height+37);
-        bool resized = notice.ClientSize != new Size(width,height);
-        if (resized) notice.ClientSize = new Size(width,height);
-        closeChat.Left = width - 44;
-        noticeName.Width = width - 120; messageStatus.Width = width - 110;
-        newReminder.Left = width - 119; upcoming.Left = newReminder.Left - upcoming.Width - 7;
-        eventList.Width = upcoming.Left - 22;
-        composer.SetBounds(12,height-56,width-24,44); RoundControl(composer);
-        replyBox.Width = composer.Width - 64; sendReply.Left = composer.Width - sendReply.Width - 6;
-        int y = composer.Top - 37;
-        acknowledge.SetBounds(13,y,90,26); snoozeReply.SetBounds(109,y,104,26);
-        finish.SetBounds(219,y,Math.Min(width-232,125),26);
-        messageThread.SetBounds(10,110,width-20,(actions ? y : composer.Top) - 117);
+        int width = Math.Min(388,Math.Max(318,grid.Units(area.Width)-12));
+        int height = Math.Min(Math.Max(260,grid.Units(area.Height)-12),messages==0 ? 268 : messages==1 ? 321 : 418);
+        if (actions && messages<=1) height = Math.Min(grid.Units(area.Height)-12,height+37);
+        var targetSize = new Size(grid.Px(width),grid.Px(height));
+        bool resized = notice.ClientSize != targetSize;
+        if (!resized && !dpiChanged && actions==lastActions) return false;
+        lastActions=actions;
+        if (resized) notice.ClientSize = targetSize;
+        grid.Place(avatar,14,12,38,38);
+        grid.Place(noticeName,61,8,width-120,28);
+        grid.Place(messageStatus,62,35,width-110,19);
+        grid.Place(closeChat,width-44,13,30,30);
+        grid.Place(chatRule,1,63,width-2,1);
+        grid.Place(newReminder,width-119,74,104,26);
+        grid.Place(upcoming,width-207,74,81,26);
+        grid.Place(eventList,14,75,width-230,26);
+        grid.Place(composer,12,height-56,width-24,44);
+        grid.Place(replyBox,12,12,width-88,24);
+        grid.Place(sendReply,width-62,6,32,32);
+        int y = height-93;
+        grid.Place(acknowledge,13,y,90,26); grid.Place(snoozeReply,109,y,104,26);
+        grid.Place(finish,219,y,Math.Min(width-232,125),26);
+        grid.Place(messageThread,10,110,width-20,(actions ? y : height-56)-117);
         if (resized && notice.Visible) Place(notice);
+        return true;
     }
-    void UpdateBadge() {
+    [DllImport("user32.dll")] static extern bool RedrawWindow(IntPtr hwnd,IntPtr rect,IntPtr region,uint flags);
+    void RepaintConversation() {
+        if (notice.IsHandleCreated && notice.Visible && !notice.IsDisposed && !notice.Disposing)
+            RedrawWindow(notice.Handle,IntPtr.Zero,IntPtr.Zero,0x0001|0x0004|0x0080|0x0100|0x0400);
+    }
+    int badgeCount=-1;
+    void UpdateBadge(bool force=false) {
+        if (!force && badgeCount==outstanding.Count) return;
+        badgeCount=outstanding.Count;
         urgent = outstanding.Count > 0;
         string caption = profile.Name + (urgent ? " · " + outstanding.Count + " awaiting reply" : " · desktop reminders");
         tray.Text = caption.Substring(0,Math.Min(63,caption.Length));
@@ -672,15 +1071,55 @@ class ReminderDot : Form {
         hints.SetToolTip(this,caption);
         tray.Icon = urgent ? waitingIcon : trayIcon ?? SystemIcons.Information;
         if (messagesButton != null) messagesButton.Text = urgent ? "Messages (" + outstanding.Count + ")" : "Messages";
+        UpdatePetRegion();
+        RefreshPet();
+    }
+    protected override void OnSizeChanged(EventArgs e) {
+        base.OnSizeChanged(e);
+        UpdatePetRegion();
+    }
+    void UpdatePetRegion() {
+        if (profile==null || ClientSize.Width<1 || ClientSize.Height<1 ||
+            (petRegionSize==ClientSize && petRegionWaiting==urgent)) return;
         var oldShape = Region; Region = PetArtwork.Shape(ClientRectangle,urgent);
         if (oldShape != null) oldShape.Dispose();
-        RefreshPet();
+        petRegionSize=ClientSize; petRegionWaiting=urgent;
     }
 
 
+    long inboxRevision=-1;
+    List<ChatEntry> historySnapshot=new List<ChatEntry>();
+    bool openingInbox;
+    void SelectDraft(ConversationChoice selected) {
+        string id=selected==null ? null : selected.MessageId;
+        if (id==composingFor) return;
+        if (composingFor!=null) {
+            if (replyBox.TextLength==0) drafts.Remove(composingFor);
+            else drafts[composingFor]=replyBox.Text;
+        }
+        composingFor=id;
+        string text;
+        replyBox.Text=id!=null && drafts.TryGetValue(id,out text) ? text : "";
+        replyBox.SelectionStart=replyBox.TextLength;
+    }
     void SyncInbox(string preferred = null) {
         var previous = SelectedConversation;
         string oldId = previous == null ? null : previous.MessageId;
+        long version=store.Revision;
+        if (version!=inboxRevision) {
+            historySnapshot=store.History;
+            SyncChoices(version);
+        }
+        rebuilding=true;
+        try {
+            var choices=eventList.Items.Cast<ConversationChoice>();
+            var target=choices.FirstOrDefault(c=>c.MessageId==(preferred ?? oldId)) ?? choices.FirstOrDefault();
+            if (target!=null && target!=SelectedConversation) eventList.SelectedItem=target;
+            SelectDraft(target);
+        } finally { rebuilding=false; }
+        UpdateBadge(); RenderNotice();
+    }
+    void SyncChoices(long version) {
         outstanding.Clear(); outstanding.AddRange(store.Inbox);
         var choices = outstanding.Select(n=>new ConversationChoice {
             MessageId=n.MessageId, TaskId=n.Id, Pending=true,
@@ -690,80 +1129,184 @@ class ReminderDot : Form {
         choices.Add(new ConversationChoice { MessageId=GlobalChat, TaskId=GlobalChat, Label="All messages" });
         var inboxIds = new HashSet<string>(outstanding.Select(n=>n.MessageId));
         // Keep the last answered conversation for each task available even when its final reply cleared the badge.
-        foreach (var group in store.History.AsEnumerable().Reverse().Where(h=>h.TaskId!=GlobalChat && !inboxIds.Contains(h.MessageId)).GroupBy(h=>h.TaskId)) {
-            var last = group.First();
+        var seen=new HashSet<string>();
+        for (int i=historySnapshot.Count-1;i>=0;i--) {
+            var last=historySnapshot[i];
+            if (last.TaskId==GlobalChat || inboxIds.Contains(last.MessageId) || !seen.Add(last.TaskId)) continue;
             string title; titleById.TryGetValue(last.TaskId,out title);
             choices.Add(new ConversationChoice { MessageId=last.MessageId, TaskId=last.TaskId,
                 Label=(title ?? "Earlier reminder") + "   ·   " + last.AtUtc.ToLocalTime().ToString("g") + "   ·   Replied" });
         }
-        rebuilding = true;
-        try {
+        bool changed=choices.Count!=eventList.Items.Count || choices.Where((choice,i)=>{
+            var old=(ConversationChoice)eventList.Items[i];
+            return choice.MessageId!=old.MessageId || choice.TaskId!=old.TaskId || choice.Pending!=old.Pending || choice.Label!=old.Label;
+        }).Any();
+        if (changed) {
+            rebuilding=true; eventList.BeginUpdate();
+            try {
             eventList.Items.Clear(); eventList.Items.AddRange(choices.ToArray());
-            var target = choices.FirstOrDefault(c=>c.MessageId==(preferred ?? oldId)) ?? choices.FirstOrDefault();
-            if (target != null) eventList.SelectedItem = target;
-            if (target == null || target.MessageId != oldId) replyBox.Clear();
-        } finally { rebuilding = false; }
-        UpdateBadge(); RenderNotice();
+            } finally { eventList.EndUpdate(); rebuilding=false; }
+        }
+        inboxRevision=version;
     }
 
     void RenderNotice() {
-        if (rebuilding || finish == null) return;
+        if (rebuilding || finish==null || notice.IsDisposed || notice.Disposing || (!notice.Visible && !openingInbox)) return;
+        WithPanelDpi(RenderConversation,true);
+    }
+    sealed class MessageRow {
+        public readonly Label Stamp = new Label { UseMnemonic=false };
+        public readonly MessageBubble Bubble = new MessageBubble { UseMnemonic=false };
+        public ChatEntry Entry;
+        public int Top, Bottom, Width, Height;
+    }
+    List<MessageRow> renderedRows=new List<MessageRow>();
+    List<ChatEntry> visibleEntries=new List<ChatEntry>();
+    long renderedRevision=-1;
+    string renderedId;
+    PetTheme renderedTheme;
+    readonly DateTime greetingTime=DateTime.UtcNow;
+    static bool SameEntry(ChatEntry a,ChatEntry b) {
+        return a!=null && b!=null && a.AtUtc==b.AtUtc && a.FromPet==b.FromPet &&
+            a.MessageId==b.MessageId && a.TaskId==b.TaskId && a.Text==b.Text;
+    }
+    List<ChatEntry> RecentEntries(ConversationChoice current) {
+        var result=new List<ChatEntry>(41);
+        if (current==null) return result;
+        bool found=false;
+        for (int i=historySnapshot.Count-1;i>=0 && result.Count<40;i--) {
+            var entry=historySnapshot[i];
+            if (current.TaskId!=GlobalChat && entry.TaskId!=current.TaskId) continue;
+            result.Add(entry);
+            if (entry.MessageId==current.MessageId) found=true;
+        }
+        result.Reverse();
+        if (current.TaskId!=GlobalChat && result.Count==40 && !found) {
+            var original=historySnapshot.FirstOrDefault(h=>h.MessageId==current.MessageId && h.FromPet && h.TaskId==current.TaskId);
+            if (original!=null) result.Insert(0,original);
+        }
+        return result;
+    }
+    void RenderConversation() {
+        var grid = new ChatGrid(notice.MonitorDpi((int)Math.Round(panelScale*96)));
         var current = SelectedConversation;
+        string id=current==null ? null : current.MessageId;
+        bool switched=renderedId!=id;
+        bool contentChanged=switched || renderedRevision!=inboxRevision;
+        if (contentChanged) visibleEntries=RecentEntries(current);
+        int oldScroll=-messageThread.AutoScrollPosition.Y;
+        bool readToEnd=oldScroll+messageThread.ClientSize.Height>=messageThread.AutoScrollMinSize.Height-grid.Px(4);
         bool canType = current != null && !replying && !busy;
         bool canReply = canType && current.Pending;
         bool actionsVisible = current != null && current.Pending;
         finish.Visible = acknowledge.Visible = snoozeReply.Visible = actionsVisible;
-        var entries = store.History.Where(h=>current != null && (current.TaskId==GlobalChat || h.TaskId==current.TaskId)).ToList();
-        SizeConversation(entries.Count,actionsVisible);
-        var task = current == null ? null : Get(current.TaskId);
-        finish.Text = task != null && task.Submission ? "Mark submitted" : "Done"; finish.AccessibleName = finish.Text;
+        bool geometryChanged=SizeConversation(visibleEntries.Count,actionsVisible,grid);
+        if (contentChanged) {
+            var task = current == null ? null : Get(current.TaskId);
+            finish.Text = task != null && task.Submission ? "Mark submitted" : "Done"; finish.AccessibleName = finish.Text;
+        }
         finish.Enabled = canReply; acknowledge.Enabled = canReply; snoozeReply.Enabled = canReply;
         replyBox.Enabled = canType; sendReply.Enabled = canType; eventList.Enabled = !replying && current != null;
         messageStatus.Text = current == null ? "No reminder messages yet" :
             current.Pending ? (replying ? "Reading your reply…" : "Waiting for your reply") :
             current.TaskId == GlobalChat ? "Your desktop companion" : "Replied";
+        bool styled=renderedTheme!=theme;
+        if (contentChanged || geometryChanged || styled) {
+            var displayed=visibleEntries.Count>0 ? visibleEntries : new List<ChatEntry> {
+                new ChatEntry { Text=current==null ? "Your pet’s reminder messages will appear here." : profile.Greeting(),FromPet=true,AtUtc=greetingTime } };
+            if (geometryChanged || styled || switched || displayed.Count!=renderedRows.Count ||
+                displayed.Where((entry,i)=>!SameEntry(renderedRows[i].Entry,entry)).Any()) {
+                UpdateRows(displayed,grid,geometryChanged,styled,oldScroll,switched || readToEnd);
+            }
+            renderedRevision=inboxRevision; renderedId=id; renderedTheme=theme;
+        }
+        if (geometryChanged) RepaintConversation();
+    }
+    void UpdateRows(List<ChatEntry> entries,ChatGrid grid,bool geometryChanged,bool styled,int oldScroll,bool followEnd) {
+        var anchor=renderedRows.FirstOrDefault(row=>row.Bottom>oldScroll);
+        var anchorEntry=anchor==null ? null : anchor.Entry;
+        int offset=anchor==null ? 0 : oldScroll-anchor.Top;
+        var pool=new List<MessageRow>(renderedRows);
+        var next=new MessageRow[entries.Count];
+        // Match stable records first so a rolling 40-message window keeps its existing native controls.
+        for (int i=0;i<entries.Count;i++) {
+            int index=pool.FindIndex(row=>SameEntry(row.Entry,entries[i]));
+            if (index>=0) { next[i]=pool[index]; pool.RemoveAt(index); }
+        }
+        int y=grid.Px(8);
+        // WinForms scrolls each child HWND separately. Present a batch after all rows have moved.
+        bool batch=messageThread.Visible && messageThread.IsHandleCreated && entries.Count>1;
+        if (batch) SendMessageNative(messageThread.Handle,0x000B,IntPtr.Zero,null); // WM_SETREDRAW
         messageThread.SuspendLayout();
         try {
-            messageThread.AutoScrollPosition = Point.Empty;
-            while (messageThread.Controls.Count > 0) messageThread.Controls[0].Dispose();
-            if (current == null) {
-                Caption(messageThread,"Your pet’s reminder messages will appear here.",14,14,335,55,10,false);
-                return;
+            for (int i=0;i<entries.Count;i++) {
+                var row=next[i];
+                if (row==null) {
+                    if (pool.Count>0) { row=pool[pool.Count-1]; pool.RemoveAt(pool.Count-1); }
+                    else {
+                        row=new MessageRow();
+                        messageThread.Controls.Add(row.Stamp); messageThread.Controls.Add(row.Bubble);
+                    }
+                    next[i]=row;
+                }
+                ArrangeRow(row,entries[i],y,grid,geometryChanged,styled);
+                row.Stamp.TabIndex=i*2; row.Bubble.TabIndex=i*2+1;
+                y=row.Bottom;
             }
-            if (entries.Count == 0) {
-                AddBubble(new ChatEntry { Text=profile.Greeting(),FromPet=true,AtUtc=DateTime.UtcNow },0);
-                messageThread.AutoScrollMinSize = Size.Empty; return;
+            foreach (var row in pool) { row.Stamp.Dispose(); row.Bubble.Dispose(); }
+            renderedRows=next.ToList();
+            messageThread.AutoScrollMinSize=new Size(0,y);
+        } finally {
+            try {
+                messageThread.ResumeLayout(true);
+                var kept=followEnd ? null : renderedRows.FirstOrDefault(row=>SameEntry(row.Entry,anchorEntry));
+                int scroll=followEnd ? y : kept==null ? 0 : kept.Top+offset;
+                messageThread.AutoScrollPosition=new Point(0,Math.Max(0,scroll));
+            } finally {
+                if (batch) {
+                    SendMessageNative(messageThread.Handle,0x000B,new IntPtr(1),null);
+                    RedrawWindow(messageThread.Handle,IntPtr.Zero,IntPtr.Zero,0x0001|0x0004|0x0080|0x0400);
+                }
             }
-            int y = 8;
-            var displayed = entries.Skip(Math.Max(0,entries.Count-40)).ToList();
-            // Keep the addressed reminder in view if this task has a long conversation.
-            if (current.TaskId!=GlobalChat && displayed.Count > 0 && !displayed.Any(h=>h.MessageId==current.MessageId)) {
-                var original = entries.FirstOrDefault(h=>h.MessageId==current.MessageId && h.FromPet);
-                if (original != null) displayed.Insert(0,original);
-            }
-            foreach (var log in displayed) y = AddBubble(log,y);
-            messageThread.AutoScrollMinSize = new Size(0,y);
-        } finally { messageThread.ResumeLayout(true); }
-        messageThread.AutoScrollPosition = new Point(0,messageThread.DisplayRectangle.Height);
+        }
     }
-    int AddBubble(ChatEntry entry,int y) {
+    sealed class MessageBubble : Label {
+        public MessageBubble() { SetStyle(ControlStyles.Opaque|ControlStyles.AllPaintingInWmPaint|ControlStyles.OptimizedDoubleBuffer,true); }
+        protected override void OnPaint(PaintEventArgs e) {
+            e.Graphics.Clear(Parent==null ? SystemColors.Window : Parent.BackColor);
+            e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+            using (var shape = BubbleShape(Width,Height))
+            using (var fill = new SolidBrush(BackColor)) e.Graphics.FillPath(fill,shape);
+            TextRenderer.DrawText(e.Graphics,Text,Font,
+                new Rectangle(Padding.Left,Padding.Top,Width-Padding.Horizontal,Height-Padding.Vertical),
+                ForeColor,TextFormatFlags.WordBreak|TextFormatFlags.NoPrefix|TextFormatFlags.TextBoxControl);
+        }
+    }
+    void ArrangeRow(MessageRow row,ChatEntry entry,int y,ChatGrid grid,bool geometryChanged,bool styled) {
+        bool changed=!SameEntry(row.Entry,entry);
         bool pet = entry.FromPet;
-        int available = messageThread.Width - 25;
-        int max = Math.Min(264,available-42);
-        var flags = TextFormatFlags.WordBreak | TextFormatFlags.NoPrefix | TextFormatFlags.TextBoxControl;
-        var measured = TextRenderer.MeasureText(entry.Text,notice.Font,new Size(max,Int32.MaxValue),flags);
-        int width = Math.Max(96,Math.Min(max,measured.Width)+18);
-        int height = Math.Max(28,measured.Height+12);
-        int x = pet ? 8 : available-width;
-        string stamp = (pet ? profile.Name : "You") + "   " + entry.AtUtc.ToLocalTime().ToString("MMM d, h:mm tt");
-        var label = Caption(messageThread,stamp,pet ? x : 1,y,pet ? available : available-1,18,8,false);
-        label.ForeColor = Color.FromArgb(74,95,87); label.TextAlign = pet ? ContentAlignment.MiddleLeft : ContentAlignment.MiddleRight;
-        var bubble = new Label { Text=entry.Text, AccessibleName=entry.Text, AutoSize=false, Padding=new Padding(9,5,9,5),
-            UseMnemonic=false, BackColor=pet ? Color.FromArgb(231,238,227) : Teal, ForeColor=pet ? Ink : Color.White };
-        bubble.SetBounds(x,y+19,width,height);
-        using (var edge = BubbleShape(width,height)) bubble.Region = new Region(edge);
-        messageThread.Controls.Add(bubble);
-        return y + height + 29;
+        int available = messageThread.Width-grid.Px(25);
+        if (changed || geometryChanged) {
+            int max=Math.Min(grid.Px(264),available-grid.Px(42));
+            var flags=TextFormatFlags.WordBreak|TextFormatFlags.NoPrefix|TextFormatFlags.TextBoxControl;
+            var measured=TextRenderer.MeasureText(entry.Text,notice.Font,new Size(max,Int32.MaxValue),flags);
+            row.Width=Math.Max(grid.Px(96),Math.Min(max,measured.Width)+grid.Px(18));
+            row.Height=Math.Max(grid.Px(28),measured.Height+grid.Px(12));
+            row.Bubble.Padding=new Padding(grid.Px(9),grid.Px(5),grid.Px(9),grid.Px(5));
+            row.Stamp.Font=UiFont(8,FontStyle.Regular,grid.Dpi);
+        }
+        if (changed || styled) {
+            row.Bubble.Text=entry.Text; row.Bubble.AccessibleName=entry.Text;
+            row.Bubble.BackColor=pet ? theme.Incoming : theme.Outgoing; row.Bubble.ForeColor=theme.Ink;
+            row.Stamp.Text=(pet ? profile.Name : "You")+"   "+entry.AtUtc.ToLocalTime().ToString("MMM d, h:mm tt");
+            row.Stamp.TextAlign=pet ? ContentAlignment.MiddleLeft : ContentAlignment.MiddleRight;
+            row.Stamp.BackColor=theme.Canvas; row.Stamp.ForeColor=theme.Accent;
+        }
+        int x=pet ? grid.Px(8) : available-row.Width;
+        int screenY=y+messageThread.AutoScrollPosition.Y;
+        row.Stamp.SetBounds(pet?x:1,screenY,pet?available:available-1,grid.Px(18));
+        row.Bubble.SetBounds(x,screenY+grid.Px(19),row.Width,row.Height);
+        row.Top=y; row.Bottom=y+row.Height+grid.Px(29); row.Entry=entry;
     }
     string NudgeMessage(Nudge nudge, TaskItem t) {
         return profile.Voice(nudge.Id.StartsWith("test-") ? "test" : nudge.Kind,nudge.Title,
@@ -778,8 +1321,8 @@ class ReminderDot : Form {
     void AddChatPair(ConversationChoice current,string words,string answer) {
         try {
             store.Chat(current.MessageId,current.TaskId,words,answer);
-            replyBox.Clear(); SyncInbox(current.MessageId);
-        } catch(Exception e) { messageStatus.Text = "I couldn’t save that message. " + e.Message; }
+            SyncInbox(current.MessageId);
+        } catch(Exception e) { SetExpression(EyeExpression.Sad); messageStatus.Text = "I couldn’t save that message. " + e.Message; }
     }
     void AnswerQuick(string action,string words) {
         var selected = SelectedConversation;
@@ -788,94 +1331,37 @@ class ReminderDot : Form {
     }
     void CompleteReply(ConversationChoice selected,string words,Intent command) {
         try {
-            var task = Get(selected.TaskId);
-            if (task == null || !store.Inbox.Any(x=>x.MessageId==selected.MessageId)) { SyncInbox(); return; }
-            if (command.Id != null && command.Id != task.Id) {
-                Clarify(selected,words,"This message is about “" + task.Title + "”. What would you like to do with this task?"); return;
-            }
-            TaskItem changed = null;
-            string answer = null;
-            switch (command.Action) {
-                case "snooze":
-                    changed = task;
-                    changed.CheckUtc = command.CheckUtc ?? DateTime.UtcNow.AddMinutes(10);
-                    if (changed.CheckUtc <= DateTime.UtcNow) {
-                        Clarify(selected,words,"When should I message you again?"); return;
-                    }
-                    answer = "I’ll message you again at " + Time(changed.CheckUtc.Value) + ".";
-                    break;
-                case "draft":
-                    changed = task; changed.Stage = "draft ready"; changed.CheckUtc = null;
-                    answer = task.Submission ? "Draft ready. I’ll keep the upload deadline on your list." : "Got it. Your draft is ready.";
-                    break;
-                case "done":
-                case "submitted":
-                    if (task.Submission && command.Action != "submitted") {
-                        Clarify(selected,words,"Did you submit " + task.Title + "? Reply “I submitted it” once the upload is complete."); return;
-                    }
-                    changed = task; changed.Stage = "done"; changed.CheckUtc = null; changed.WarnUtc = null;
-                    answer = task.Submission ? "Got it. I’ve marked it submitted." : "I’ve marked that task done.";
-                    break;
-                case "ack":
-                case "working":
-                    if (task.Id.StartsWith("test-")) { changed = task; changed.Stage = "done"; }
-                    break;
-                default:
-                    Clarify(selected,words,command.Reply ?? "Should I snooze this reminder, mark the task done, or record a progress update?"); return;
-            }
-            if (store.Answer(selected.MessageId,words,changed,answer)) {
-                replyBox.Clear(); RefreshTasks(task.Id);
-                if (changed != null && command.Action == "snooze")
-                    Say("I’ll check in on " + task.Title + " at " + Time(changed.CheckUtc.Value) + ".");
-            }
-            SyncInbox(selected.MessageId);
-        } catch(Exception e) { messageStatus.Text = "Reply could not be saved. " + e.Message; }
-    }
-    void Clarify(ConversationChoice selected,string words,string question) {
-        if (store.Clarify(selected.MessageId,words,question)) replyBox.Clear();
-        SyncInbox(selected.MessageId);
+            if (!store.Inbox.Any(n=>n.MessageId==selected.MessageId)) { SyncInbox(); return; }
+            if (command.Action=="snooze") command.CheckUtc=DateTime.UtcNow.AddMinutes(10);
+            CommitCommand(selected,words,command,selected.TaskId,"");
+        } catch(Exception e) { SetExpression(EyeExpression.Sad); messageStatus.Text="Reply could not be saved. "+e.Message; }
     }
     async Task SendThreadReply() {
         var selected = SelectedConversation;
         string words = replyBox.Text.Trim();
-        if (replying || busy || selected == null || words.Length == 0) return;
-        var query = Language.ReminderListQuery(words,DateTime.Now,store.Items);
-        if (query != null) { AddChatPair(selected,words,query.Reply); return; }
-        if (!selected.Pending) {
-            replying = true; RenderNotice();
-            try { await SendMessage(words,selected); if (!notice.IsDisposed) { replyBox.Clear(); SyncInbox(selected.MessageId); } }
-            finally { replying = false; if (!notice.IsDisposed) { RenderNotice(); replyBox.Focus(); } }
-            return;
-        }
-        var current = Get(selected.TaskId);
-        if (current == null) { SyncInbox(); return; }
-        var logs = store.History.Where(h=>h.MessageId==selected.MessageId).ToList();
-        var lastQuestion = logs.LastOrDefault(h=>h.FromPet);
-        if (current.Submission && lastQuestion != null &&
-            Regex.IsMatch(lastQuestion.Text,@"(?:have you submitted|did you submit|did (?:the|your) upload go through)",RegexOptions.IgnoreCase) &&
-            Regex.IsMatch(words,@"^(?:yes|yep|yeah)[.!]?$",RegexOptions.IgnoreCase)) {
-            CompleteReply(selected,words,new Intent { Action="submitted",Id=current.Id }); return;
-        }
-        var exchanges = logs.Skip(1).ToList();
-        string prior = String.Join("\n",exchanges.Select(h=>(h.FromPet ? "Blink: " : "User: ") + h.Text));
-        bool actionLike = Regex.IsMatch(words,@"\b(snooze|remind|check again|check in|later|finished|finish|submitted|submit|uploaded|upload|done|completed|draft|exported|working|reschedule|postpone|move|mark)\b",RegexOptions.IgnoreCase);
-        bool needsClarification = exchanges.Count > 0 && lastQuestion != null && lastQuestion.Text.Contains("?");
-        if (!actionLike && (!needsClarification || Regex.IsMatch(words,@"^(?:got it|thanks|thank you|okay|ok)[.!]?$",RegexOptions.IgnoreCase))) {
-            CompleteReply(selected,words,new Intent { Action="ack",Id=current.Id }); return;
-        }
-        replying = true; RenderNotice();
+        if (replying || busy || selected==null || words.Length==0) return;
+        replying=true;
         try {
-            string request = words;
-            if (exchanges.Count > 0 && Regex.IsMatch(words,@"^(?:in )?(?:an?|one|\d+) (?:min(?:ute)?s?|hours?|days?)\.?$",RegexOptions.IgnoreCase))
-                request = "Snooze " + words;
-            var command = await Language.Read(request,DateTime.Now,store.Items,current,prior,profile);
-            if (notice.IsDisposed) return;
-            if (command == null) { Clarify(selected,words,"What would you like me to do with this reminder?"); return; }
-            CompleteReply(selected,words,command);
-        } catch(Exception e) { if (!notice.IsDisposed) messageStatus.Text = "I couldn’t send that reply. " + e.Message; }
-        finally { replying=false; if (!notice.IsDisposed) { RenderNotice(); if (notice.Visible && replyBox.Enabled) replyBox.Focus(); } }
+            var sending=SendMessage(words,selected);
+            if (!sending.IsCompleted) RenderNotice();
+            bool saved=await sending;
+            if (saved && !notice.IsDisposed) {
+                drafts.Remove(selected.MessageId);
+                if (composingFor==selected.MessageId) replyBox.Clear();
+            }
+        } finally {
+            replying=false;
+            if (!notice.IsDisposed) {
+                RenderNotice();
+                if (notice.Visible && notice.Enabled && replyBox.Enabled && Form.ActiveForm==notice) replyBox.Focus();
+            }
+        }
     }
     void Poll() {
+        if (responseExpression != EyeExpression.Neutral && DateTime.UtcNow >= expressionUntil) {
+            responseExpression = EyeExpression.Neutral;
+            RefreshPet();
+        }
         if (DateTime.UtcNow < nextPoll) return;
         try {
             var due = store.TakeDue(DateTime.UtcNow,n=>NudgeMessage(n,Get(n.Id)));
