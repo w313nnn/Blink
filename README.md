@@ -41,7 +41,7 @@ Tell Blink “I finished writing” when your draft is ready. The assignment sta
 
 Click Blink again or use the chat’s close button to leave the pet floating. To hide the pet too, right-click it and choose **Hide pet**. Blink still receives reminders. To bring it back, right-click its icon in the Windows notification area. You may need to open the hidden-icons arrow first.
 
-Blink sends a Windows notification when a reminder is due. Windows controls its sound and may silence it when Do Not Disturb is on. To receive reminders only in chat, turn off **Windows notification banners** in the pet menu.
+When a reminder is due, Blink plays a Windows chime and requests a notification. If Windows does not report showing the banner, Blink shows a small message above the taskbar. Click it to open the reminder. The chime uses your Windows sound settings. To receive reminders only in chat, turn off **Windows notification banners** in the pet menu.
 
 ### Earlier messages
 

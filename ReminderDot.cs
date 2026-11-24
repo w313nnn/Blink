@@ -40,6 +40,27 @@ sealed class ConversationPopover : Form {
     [DllImport("dwmapi.dll")] static extern int DwmSetWindowAttribute(IntPtr hwnd,int attr,ref int value,int size);
 }
 
+// A reminder banner must leave the current application and unread state alone.
+sealed class ReminderBanner : Form {
+    public ReminderBanner(string heading,string message,Color background,Color foreground,Rectangle area,Action open) {
+        FormBorderStyle=FormBorderStyle.None; StartPosition=FormStartPosition.Manual;
+        ShowInTaskbar=false; BackColor=background; ForeColor=foreground;
+        AutoScaleMode=AutoScaleMode.None;
+        float scale;
+        using(var g=CreateGraphics()) scale=g.DpiX/96f;
+        ClientSize=new Size(Math.Min(area.Width,(int)(310*scale)),(int)(96*scale));
+        Location=new Point(Math.Max(area.Left,area.Right-Width-12),Math.Max(area.Top,area.Bottom-Height-12));
+        var name=new Label {Text=heading,Dock=DockStyle.Top,Height=(int)(28*scale),AutoEllipsis=true,UseMnemonic=false};
+        var body=new Label {Text=message,Dock=DockStyle.Fill,AutoEllipsis=true,UseMnemonic=false};
+        Padding=new Padding((int)(12*scale)); Controls.Add(body); Controls.Add(name);
+        Cursor=Cursors.Hand; AccessibleName=heading+" reminder";
+        EventHandler click=(sender,args)=>open();
+        Click+=click; name.Click+=click; body.Click+=click;
+    }
+    protected override bool ShowWithoutActivation { get { return true; } }
+    protected override CreateParams CreateParams { get { var p=base.CreateParams; p.ExStyle|=0x08000000|0x80|0x08; return p; } }
+}
+
 class ReminderDot : Form {
     static readonly float panelScale = ReadPanelScale();
     static readonly Dictionary<string,Font> fonts = new Dictionary<string,Font>();
@@ -114,6 +135,21 @@ class ReminderDot : Form {
     string focusId;
     bool refreshing, busy, quitting, urgent, petHidden, eyesClosed, hovering, rebuilding, replying;
     string notifiedMessageId;
+    readonly Timer alertTimer=new Timer();
+    ReminderBanner alertBanner;
+    string alertText;
+    void CloseAlert() {
+        alertTimer.Stop();
+        if(alertBanner!=null) { alertBanner.Dispose(); alertBanner=null; }
+    }
+    void AlertTick(object sender,EventArgs args) {
+        alertTimer.Stop();
+        if(alertBanner!=null || !banners.Checked) { CloseAlert(); return; }
+        alertBanner=new ReminderBanner(profile.Name,alertText,theme.Soft,notice.ForeColor,
+            Screen.FromControl(this).WorkingArea,()=>OpenInbox(notifiedMessageId));
+        alertBanner.Show();
+        alertTimer.Interval=9000; alertTimer.Start();
+    }
     const string GlobalChat = "__general";
     DateTime nextPoll = DateTime.MinValue;
 
@@ -217,7 +253,7 @@ class ReminderDot : Form {
         };
         timer.Interval = 750; timer.Tick += delegate { Poll(); }; timer.Start();
         FormClosed += delegate {
-            quitting = true; timer.Dispose(); blink.Dispose(); ReleasePetSurface(); tray.Visible = false; tray.Dispose();
+            quitting = true; CloseAlert(); alertTimer.Dispose(); timer.Dispose(); blink.Dispose(); ReleasePetSurface(); tray.Visible = false; tray.Dispose();
             if (trayIcon != null) trayIcon.Dispose(); if (waitingIcon != null) waitingIcon.Dispose();
             chatMotion.Dispose(); editorMotion.Dispose(); notice.Dispose(); editor.Dispose(); hints.Dispose();
             foreach (var font in fonts.Values) font.Dispose();
@@ -369,6 +405,8 @@ class ReminderDot : Form {
         menu.Opening += delegate { toggle.Text = petHidden ? "Show pet" : "Hide pet"; };
         tray.Text = "Blink · desktop reminders"; tray.ContextMenuStrip = menu;
         tray.DoubleClick += delegate { OpenInbox(); };
+        alertTimer.Tick+=AlertTick;
+        tray.BalloonTipShown+=delegate { CloseAlert(); };
         tray.BalloonTipClicked += delegate { OpenInbox(notifiedMessageId); };
         tray.Visible = true;
     }
@@ -377,6 +415,7 @@ class ReminderDot : Form {
         petHidden = true; notice.Hide(); editor.Hide(); Hide();
     }
     void OpenInbox(string messageId = null) {
+        CloseAlert();
         if (petHidden) TogglePet();
         editor.Hide();
         openingInbox=true;
@@ -1513,6 +1552,10 @@ class ReminderDot : Form {
                 tray.BalloonTipTitle = profile.Name;
                 string text = newest.Text + (due.Count > 1 ? " You have " + due.Count + " new messages." : "");
                 tray.BalloonTipText = text.Length > 245 ? text.Substring(0,244) + "…" : text;
+                CloseAlert();
+                alertText=text;
+                alertTimer.Interval=1500; alertTimer.Start();
+                System.Media.SystemSounds.Asterisk.Play();
                 tray.ShowBalloonTip(10000);
             }
         } catch(Exception e) {
