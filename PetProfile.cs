@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Drawing;
 using System.IO;
 using System.Linq;
@@ -48,17 +49,51 @@ public sealed class PetTheme {
     }
 }
 
+public sealed class HistoryWindow {
+    readonly DateTime firstOfMonth;
+    readonly int months, startDay;
+    public DateTime Start { get; private set; }
+    public DateTime End { get; private set; }
+
+    internal HistoryWindow(DateTime firstOfMonth, int months, int startDay) {
+        this.firstOfMonth = firstOfMonth;
+        this.months = months;
+        this.startDay = startDay;
+        Start = Boundary(firstOfMonth);
+        End = Boundary(firstOfMonth.AddMonths(months));
+    }
+    DateTime Boundary(DateTime month) {
+        int day = Math.Min(startDay,DateTime.DaysInMonth(month.Year,month.Month));
+        return month.AddDays(day-1);
+    }
+    public HistoryWindow Shift(int periods) {
+        // Move the anchor month first so a shorter February does not change March's start day.
+        return new HistoryWindow(firstOfMonth.AddMonths(checked(periods*months)),months,startDay);
+    }
+}
+
 public sealed class PetProfile {
     public const string DefaultName = "Blink";
     public static readonly string[] Personalities = { "Calm", "Playful", "Direct" };
     public static readonly string[] Appearances = { "Red", "Orange", "Yellow", "Green", "Blue", "Purple" };
     public static readonly string[] Sizes = { "Small", "Medium" };
+    public static readonly string[] HistoryPeriods = { "Monthly", "6 months", "Yearly" };
 
     public string Name { get; set; }
     public string Character { get; set; }
     public string Personality { get; set; }
     public string Appearance { get; set; }
     public string SizeChoice { get; set; }
+    string historyPeriod = "Monthly";
+    int historyStartDay = 1;
+    public string HistoryPeriod {
+        get { return historyPeriod; }
+        set { historyPeriod = HistoryPeriods.Contains(value) ? value : "Monthly"; }
+    }
+    public int HistoryStartDay {
+        get { return historyStartDay; }
+        set { historyStartDay = value >= 1 && value <= 31 ? value : 1; }
+    }
     public int PetPixels {
         get { return SizeChoice == "Medium" ? 54 : 44; }
     }
@@ -71,6 +106,15 @@ public sealed class PetProfile {
         SizeChoice = "Small";
     }
     public PetProfile Copy() { return (PetProfile)MemberwiseClone(); }
+
+    public HistoryWindow HistoryAt(DateTime localDate) {
+        if (localDate.Kind == DateTimeKind.Utc) localDate = localDate.ToLocalTime();
+        int months = HistoryPeriod == "Yearly" ? 12 : HistoryPeriod == "6 months" ? 6 : 1;
+        int month = 1 + (localDate.Month-1)/months*months;
+        var anchor = new DateTime(localDate.Year,month,1,0,0,0,DateTimeKind.Local);
+        var window = new HistoryWindow(anchor,months,HistoryStartDay);
+        return localDate < window.Start ? window.Shift(-1) : window;
+    }
 
     public PetTheme GetTheme() { return PetTheme.For(Appearance); }
     public Color GetColor() { return GetTheme().Coat; }
@@ -114,8 +158,14 @@ public sealed class PetProfile {
     public static PetProfile Load(string dir) {
         string path = ProfilePath(dir);
         if (!File.Exists(path)) return new PetProfile();
-        var profile = new JavaScriptSerializer().Deserialize<PetProfile>(File.ReadAllText(path));
-        if (profile == null) throw new InvalidDataException("The pet profile is empty.");
+        var serializer = new JavaScriptSerializer();
+        var fields = serializer.Deserialize<Dictionary<string,object>>(File.ReadAllText(path));
+        if (fields == null) throw new InvalidDataException("The pet profile is empty.");
+        // A damaged optional preference should not stop the rest of an existing profile from loading.
+        object value;
+        if (fields.TryGetValue("HistoryStartDay",out value) && !(value is int)) fields.Remove("HistoryStartDay");
+        if (fields.TryGetValue("HistoryPeriod",out value) && !(value is string)) fields.Remove("HistoryPeriod");
+        var profile = serializer.ConvertToType<PetProfile>(fields);
         profile.Validate();
         return profile;
     }
@@ -141,7 +191,7 @@ public sealed class PetProfile {
         string path = ProfilePath(dir);
         string temp = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
         try {
-            var fields = new { Name, Character, Personality, Appearance, SizeChoice };
+            var fields = new { Name, Character, Personality, Appearance, SizeChoice, HistoryPeriod, HistoryStartDay };
             File.WriteAllText(temp,new JavaScriptSerializer().Serialize(fields),new UTF8Encoding(false));
             if (File.Exists(path)) File.Replace(temp,path,null);
             else File.Move(temp,path);

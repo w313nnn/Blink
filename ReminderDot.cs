@@ -92,6 +92,8 @@ class ReminderDot : Form {
     readonly Dictionary<string,string> drafts = new Dictionary<string,string>();
     string composingFor;
     readonly Label messageStatus = new Label();
+    readonly Label emptyHistory = new Label();
+    Button previousPeriod, historyRange, nextPeriod, olderMessages, newerMessages;
     readonly ComboBox eventList = new ComboBox();
     readonly List<Nudge> outstanding = new List<Nudge>();
     readonly Timer timer = new Timer();
@@ -334,7 +336,7 @@ class ReminderDot : Form {
     void BuildDotMenu() {
         var menu = new ContextMenuStrip();
         menu.Items.Add("Open Blink",null,(s,e) => OpenInbox());
-        menu.Items.Add("Show pending reminders",null,(s,e) => OpenInbox());
+        menu.Items.Add("Show pending reminders",null,(s,e) => OpenInbox(outstanding.Count==0 ? null : outstanding[0].MessageId));
         menu.Items.Add("Open checklist file",null,(s,e) => {
             string error;
             if (!TryOpenChecklist(out error)) MessageBox.Show(error,"Blink checklist",MessageBoxButtons.OK,MessageBoxIcon.Information);
@@ -378,7 +380,24 @@ class ReminderDot : Form {
         if (petHidden) TogglePet();
         editor.Hide();
         openingInbox=true;
-        try { SyncInbox(messageId ?? (replyBox.TextLength==0 && outstanding.Count>0 ? outstanding[0].MessageId : null)); }
+        try {
+            string preferred=messageId;
+            if (messageId!=null) {
+                var pending=outstanding.FirstOrDefault(n=>n.MessageId==messageId);
+                var entry=historySnapshot.LastOrDefault(h=>h.MessageId==messageId);
+                DateTime? sent=pending!=null ? (DateTime?)pending.SentUtc : entry==null ? null : (DateTime?)entry.AtUtc;
+                if (sent.HasValue) {
+                    var target=profile.HistoryAt(sent.Value.ToLocalTime());
+                    browsingDate=target.Start==profile.HistoryAt(DateTime.Now).Start ? (DateTime?)null : target.Start;
+                    locateMessage=messageId;
+                }
+            } else if (!browsingDate.HasValue && historyPage==0 && replyBox.TextLength==0) {
+                var window=profile.HistoryAt(DateTime.Now);
+                var pending=outstanding.FirstOrDefault(n=>{var t=n.SentUtc.ToLocalTime(); return t>=window.Start && t<window.End;});
+                if(pending!=null) preferred=pending.MessageId;
+            }
+            SyncInbox(preferred);
+        }
         finally { openingInbox=false; }
         WithPanelDpi(() => { Place(notice); if (!notice.Visible) { notice.Show(); RepaintConversation(); } },true);
         notice.Activate(); if (replyBox.Enabled) replyBox.Focus();
@@ -482,10 +501,13 @@ class ReminderDot : Form {
     }
     static GraphicsPath BubbleShape(int width,int height) {
         var edge = new GraphicsPath();
-        edge.AddArc(0,0,20,20,180,90);
-        edge.AddArc(width-21,0,20,20,270,90);
-        edge.AddArc(width-21,height-21,20,20,0,90);
-        edge.AddArc(0,height-21,20,20,90,90);
+        if (width<2 || height<2) return edge;
+        int diameter=Math.Min(20,Math.Min(width,height)-1);
+        int right=width-1-diameter, bottom=height-1-diameter;
+        edge.AddArc(0,0,diameter,diameter,180,90);
+        edge.AddArc(right,0,diameter,diameter,270,90);
+        edge.AddArc(right,bottom,diameter,diameter,0,90);
+        edge.AddArc(0,bottom,diameter,diameter,90,90);
         edge.CloseFigure(); return edge;
     }
     Label Caption(Control owner, string words, int x, int y, int w, int h, float size, bool bold) {
@@ -731,6 +753,52 @@ class ReminderDot : Form {
         box.Items.AddRange(values); box.SelectedItem = selected; BoundsInUnits(box,16,y,325,27);
         owner.Controls.Add(box); return box;
     }
+    void EditHistoryPeriod() {
+        using (var dialog=new Form()) {
+            dialog.Text="Conversation history"; dialog.AccessibleName=dialog.Text;
+            dialog.AutoScaleMode=AutoScaleMode.None; dialog.Font=editor.Font;
+            dialog.FormBorderStyle=FormBorderStyle.FixedDialog; dialog.StartPosition=FormStartPosition.CenterParent;
+            dialog.ShowInTaskbar=false; dialog.TopMost=true; dialog.MinimizeBox=false; dialog.MaximizeBox=false;
+            dialog.ClientSize=PanelSize(347,225);
+            Caption(dialog,"History period",16,12,162,20,10,true);
+            Caption(dialog,"Start day",190,12,139,20,10,true);
+            var period=Choose(dialog,"History period",36,PetProfile.HistoryPeriods,profile.HistoryPeriod);
+            BoundsInUnits(period,16,36,151,28);
+            var day=new ComboBox { AccessibleName="Starting day of month", DropDownStyle=ComboBoxStyle.DropDownList };
+            for (int i=1;i<=31;i++) day.Items.Add(i);
+            day.SelectedItem=profile.HistoryStartDay; BoundsInUnits(day,190,36,139,28); dialog.Controls.Add(day);
+
+            Caption(dialog,"Current period",16,81,314,20,10,true);
+            var dates=Caption(dialog,"",16,103,314,24,11,false);
+            var hint=Caption(dialog,"",16,131,314,42,9,false);
+            var draft=profile.Copy();
+            Action preview=delegate {
+                draft.HistoryPeriod=(string)period.SelectedItem;
+                draft.HistoryStartDay=(int)day.SelectedItem;
+                var window=draft.HistoryAt(DateTime.Today);
+                dates.Text=window.Start.ToString("d MMM yyyy")+" to "+window.End.AddDays(-1).ToString("d MMM yyyy");
+                hint.Text=draft.HistoryPeriod=="6 months" ? "Each period starts in January or July." :
+                    draft.HistoryPeriod=="Yearly" ? "Each year starts in January." :
+                    draft.HistoryStartDay>28 ? "Shorter months use their last day." : "";
+            };
+            period.SelectedIndexChanged+=delegate { preview(); };
+            day.SelectedIndexChanged+=delegate { preview(); };
+            preview();
+            var cancel=ButtonAt(dialog,"Cancel",136,177,87,32,() => dialog.Close(),false);
+            dialog.CancelButton=cancel;
+            dialog.AcceptButton=ButtonAt(dialog,"Save",234,177,95,32,() => {
+                var updated=profile.Copy();
+                updated.HistoryPeriod=draft.HistoryPeriod; updated.HistoryStartDay=draft.HistoryStartDay;
+                try { updated.Save(dataDirectory); }
+                catch (Exception e) { hint.Text="Couldn’t save your history settings. "+e.Message; return; }
+                profile=updated;
+                dialog.DialogResult=DialogResult.OK;
+            },true);
+            ApplyTheme(dialog,theme);
+            WithPanelDpi(() => dialog.ShowDialog(notice));
+            if (dialog.DialogResult==DialogResult.OK && !notice.IsDisposed) ResetHistoryView();
+        }
+    }
     void Manual() {
         using(var dialog = new Form()) {
             dialog.Text = "Set a reminder"; dialog.StartPosition = FormStartPosition.CenterParent;
@@ -804,7 +872,7 @@ class ReminderDot : Form {
             if (ChecklistOpenRequest(words)) {
                 string error;
                 string result=TryOpenChecklist(out error)?"Opened your checklist at "+store.ChecklistPath+".":error;
-                store.Chat(messageId,target.TaskId,words,result); Line("You",words); Say(result); SyncInbox(messageId);
+                store.Chat(messageId,target.TaskId,words,result); Line("You",words); Say(result); SyncAfterChat(messageId);
                 if (chat==null) input.Clear(); return true;
             }
             Intent command = Language.ReminderListQuery(words,DateTime.Now,store.Items);
@@ -915,7 +983,7 @@ class ReminderDot : Form {
         else if (command.Action=="done" || command.Action=="submitted" || command.Action=="create") SetExpression(EyeExpression.Happy);
         Line("You",words); Say(reply);
         if (change!=null || selection!=focusId) RefreshTasks(change==null ? selection : change.Id);
-        SyncInbox(id); return true;
+        SyncAfterChat(id); return true;
     }
     void Quick(string action,string id,Action<string> respond = null) {
         respond = respond ?? Say;
@@ -976,11 +1044,24 @@ class ReminderDot : Form {
         notice.Controls.Add(eventList);
         eventList.SelectedIndexChanged += delegate {
             if (rebuilding) return;
+            historyPage=0;
             SelectDraft(SelectedConversation); RenderNotice();
         };
+        previousPeriod=ButtonAt(notice,"‹",14,105,26,24,()=>MoveHistoryPeriod(-1),false);
+        historyRange=ButtonAt(notice,"",44,105,194,24,EditHistoryPeriod,false);
+        nextPeriod=ButtonAt(notice,"›",242,105,26,24,()=>MoveHistoryPeriod(1),false);
+        olderMessages=ButtonAt(notice,"Older",276,105,46,24,()=>MoveHistoryPage(1),false);
+        newerMessages=ButtonAt(notice,"Newer",326,105,46,24,()=>MoveHistoryPage(-1),false);
+        previousPeriod.AccessibleName="Previous period"; nextPeriod.AccessibleName="Next period";
+        historyRange.AccessibleName="History settings";
+        olderMessages.AccessibleName="Older messages"; newerMessages.AccessibleName="Newer messages";
+        foreach (var nav in new[]{previousPeriod,nextPeriod,olderMessages,newerMessages}) hints.SetToolTip(nav,nav.AccessibleName);
+        hints.SetToolTip(historyRange,"Change conversation history period");
         BoundsInUnits(messageThread,10,110,368,220); messageThread.AutoScroll = true;
         messageThread.AccessibleName = "Message thread";
         messageThread.BackColor = notice.BackColor; notice.Controls.Add(messageThread);
+        emptyHistory.AccessibleName="Conversation history status"; emptyHistory.TextAlign=ContentAlignment.MiddleCenter;
+        emptyHistory.Visible=false; notice.Controls.Add(emptyHistory); emptyHistory.BringToFront();
         chatMotion = new ConversationMotion(notice,messageThread);
 
         acknowledge = ButtonAt(notice,"Still working",16,336,106,29,() => AnswerQuick("working","Still working"),false);
@@ -1018,8 +1099,8 @@ class ReminderDot : Form {
         }
     }
     int lastChatDpi;
-    bool lastActions;
-    bool SizeConversation(int messages,bool actions,ChatGrid grid) {
+    bool lastActions, lastHasPages;
+    bool SizeConversation(int messages,bool actions,ChatGrid grid,bool hasPages) {
         bool dpiChanged=lastChatDpi!=grid.Dpi;
         if (dpiChanged) {
             lastChatDpi = grid.Dpi;
@@ -1029,15 +1110,16 @@ class ReminderDot : Form {
             closeChat.Font = UiFont(12,FontStyle.Regular,grid.Dpi);
             replyBox.Font = UiFont(10.5f,FontStyle.Regular,grid.Dpi);
             sendReply.Font = UiFont(13,FontStyle.Bold,grid.Dpi);
+            foreach (var nav in new[]{historyRange,olderMessages,newerMessages}) nav.Font=UiFont(8.5f,FontStyle.Regular,grid.Dpi);
         }
         var area = Screen.FromControl(this).WorkingArea;
         int width = Math.Min(388,Math.Max(318,grid.Units(area.Width)-12));
-        int height = Math.Min(Math.Max(260,grid.Units(area.Height)-12),messages==0 ? 268 : messages==1 ? 321 : 418);
+        int height = Math.Min(Math.Max(260,grid.Units(area.Height)-12),messages==0 ? 298 : messages==1 ? 351 : 448);
         if (actions && messages<=1) height = Math.Min(grid.Units(area.Height)-12,height+37);
         var targetSize = new Size(grid.Px(width),grid.Px(height));
         bool resized = notice.ClientSize != targetSize;
-        if (!resized && !dpiChanged && actions==lastActions) return false;
-        lastActions=actions;
+        if (!resized && !dpiChanged && actions==lastActions && hasPages==lastHasPages) return false;
+        lastActions=actions; lastHasPages=hasPages;
         if (resized) notice.ClientSize = targetSize;
         grid.Place(avatar,14,12,38,38);
         grid.Place(noticeName,61,8,width-120,28);
@@ -1047,13 +1129,18 @@ class ReminderDot : Form {
         grid.Place(newReminder,width-119,74,104,26);
         grid.Place(upcoming,width-207,74,81,26);
         grid.Place(eventList,14,75,width-230,26);
+        int navEnd=hasPages ? width-116 : width-14;
+        grid.Place(previousPeriod,14,106,26,24); grid.Place(historyRange,44,106,navEnd-74,24);
+        grid.Place(nextPeriod,navEnd-26,106,26,24);
+        grid.Place(olderMessages,width-111,106,46,24); grid.Place(newerMessages,width-61,106,47,24);
         grid.Place(composer,12,height-56,width-24,44);
         grid.Place(replyBox,12,12,width-88,24);
         grid.Place(sendReply,width-62,6,32,32);
         int y = height-93;
         grid.Place(acknowledge,13,y,90,26); grid.Place(snoozeReply,109,y,104,26);
         grid.Place(finish,219,y,Math.Min(width-232,125),26);
-        grid.Place(messageThread,10,110,width-20,(actions ? y : height-56)-117);
+        grid.Place(messageThread,10,140,width-20,(actions ? y : height-56)-147);
+        grid.Place(emptyHistory,20,143,width-40,(actions ? y : height-56)-153);
         if (resized && notice.Visible) Place(notice);
         return true;
     }
@@ -1091,7 +1178,39 @@ class ReminderDot : Form {
 
     long inboxRevision=-1;
     List<ChatEntry> historySnapshot=new List<ChatEntry>();
+    List<ChatEntry> periodEntries=new List<ChatEntry>();
+    DateTime periodStart, periodEnd, lastHistoryDate;
+    DateTime? browsingDate;
+    int historyPage;
+    string locateMessage;
+    const int HistoryPageSize=40;
     bool openingInbox;
+    void ResetHistoryView() {
+        browsingDate=null; historyPage=0; locateMessage=null;
+        SyncInbox();
+    }
+    void MoveHistoryPeriod(int direction) {
+        if (replying) return;
+        var live=profile.HistoryAt(DateTime.Now);
+        var target=profile.HistoryAt(browsingDate ?? DateTime.Now).Shift(direction);
+        if (target.Start>live.Start || target.Start==periodStart) return;
+        browsingDate=target.Start==live.Start ? (DateTime?)null : target.Start;
+        historyPage=0; locateMessage=null;
+        SyncInbox();
+    }
+    void MoveHistoryPage(int direction) {
+        historyPage=Math.Max(0,historyPage+direction);
+        RenderNotice();
+        if (direction<0) messageThread.AutoScrollPosition=Point.Empty;
+    }
+    void SyncAfterChat(string messageId) {
+        browsingDate=null; historyPage=0; locateMessage=null;
+        SyncInbox(messageId);
+    }
+    bool InHistoryPeriod(DateTime utc) {
+        DateTime local=utc.ToLocalTime();
+        return local>=periodStart && local<periodEnd;
+    }
     void SelectDraft(ConversationChoice selected) {
         string id=selected==null ? null : selected.MessageId;
         if (id==composingFor) return;
@@ -1108,32 +1227,51 @@ class ReminderDot : Form {
         var previous = SelectedConversation;
         string oldId = previous == null ? null : previous.MessageId;
         long version=store.Revision;
-        if (version!=inboxRevision) {
-            historySnapshot=store.History;
+        DateTime now=DateTime.Now; lastHistoryDate=now.Date;
+        var window=profile.HistoryAt(browsingDate ?? now);
+        bool periodChanged=periodStart!=window.Start || periodEnd!=window.End;
+        if (periodChanged || version!=inboxRevision) {
+            if (version!=inboxRevision) {
+                historySnapshot=store.History;
+                outstanding.Clear(); outstanding.AddRange(store.Inbox);
+            }
+            periodStart=window.Start; periodEnd=window.End;
+            if (periodChanged) historyPage=0;
+            periodEntries=historySnapshot.Where(entry=>InHistoryPeriod(entry.AtUtc)).OrderBy(entry=>entry.AtUtc).ToList();
             SyncChoices(version);
         }
         rebuilding=true;
         try {
             var choices=eventList.Items.Cast<ConversationChoice>();
-            var target=choices.FirstOrDefault(c=>c.MessageId==(preferred ?? oldId)) ?? choices.FirstOrDefault();
+            var target=choices.FirstOrDefault(c=>c.MessageId==(preferred ?? oldId)) ??
+                (previous==null ? null : choices.FirstOrDefault(c=>c.TaskId==previous.TaskId)) ??
+                choices.FirstOrDefault(c=>c.TaskId==GlobalChat);
             if (target!=null && target!=SelectedConversation) eventList.SelectedItem=target;
             SelectDraft(target);
         } finally { rebuilding=false; }
         UpdateBadge(); RenderNotice();
     }
     void SyncChoices(long version) {
-        outstanding.Clear(); outstanding.AddRange(store.Inbox);
-        var choices = outstanding.Select(n=>new ConversationChoice {
+        // A question can still await a reply when the conversation continues into a later period.
+        var pendingTimes=new Dictionary<string,DateTime>();
+        if (outstanding.Count>0) {
+            var pendingIds=new HashSet<string>(outstanding.Select(n=>n.MessageId));
+            foreach (var e in periodEntries)
+                if (pendingIds.Contains(e.MessageId)) pendingTimes[e.MessageId]=e.AtUtc;
+            foreach (var n in outstanding)
+                if (InHistoryPeriod(n.SentUtc)) pendingTimes[n.MessageId]=n.SentUtc;
+        }
+        var choices = outstanding.Where(n=>pendingTimes.ContainsKey(n.MessageId)).Select(n=>new ConversationChoice {
             MessageId=n.MessageId, TaskId=n.Id, Pending=true,
-            Label=n.Title + "   ·   " + n.SentUtc.ToLocalTime().ToString("g") + "   ·   Awaiting reply"
+            Label=n.Title + "   ·   " + pendingTimes[n.MessageId].ToLocalTime().ToString("g") + "   ·   Awaiting reply"
         }).ToList();
         var titleById = store.Items.ToDictionary(x=>x.Id,x=>x.Title);
         choices.Add(new ConversationChoice { MessageId=GlobalChat, TaskId=GlobalChat, Label="All messages" });
-        var inboxIds = new HashSet<string>(outstanding.Select(n=>n.MessageId));
+        var inboxIds = new HashSet<string>(choices.Where(c=>c.Pending).Select(c=>c.MessageId));
         // Keep the last answered conversation for each task available even when its final reply cleared the badge.
         var seen=new HashSet<string>();
-        for (int i=historySnapshot.Count-1;i>=0;i--) {
-            var last=historySnapshot[i];
+        for (int i=periodEntries.Count-1;i>=0;i--) {
+            var last=periodEntries[i];
             if (last.TaskId==GlobalChat || inboxIds.Contains(last.MessageId) || !seen.Add(last.TaskId)) continue;
             string title; titleById.TryGetValue(last.TaskId,out title);
             choices.Add(new ConversationChoice { MessageId=last.MessageId, TaskId=last.TaskId,
@@ -1165,44 +1303,55 @@ class ReminderDot : Form {
     List<MessageRow> renderedRows=new List<MessageRow>();
     List<ChatEntry> visibleEntries=new List<ChatEntry>();
     long renderedRevision=-1;
+    DateTime renderedStart, renderedEnd;
+    int renderedPage=-1, pageCount;
     string renderedId;
     PetTheme renderedTheme;
-    readonly DateTime greetingTime=DateTime.UtcNow;
     static bool SameEntry(ChatEntry a,ChatEntry b) {
         return a!=null && b!=null && a.AtUtc==b.AtUtc && a.FromPet==b.FromPet &&
             a.MessageId==b.MessageId && a.TaskId==b.TaskId && a.Text==b.Text;
     }
-    List<ChatEntry> RecentEntries(ConversationChoice current) {
-        var result=new List<ChatEntry>(41);
-        if (current==null) return result;
-        bool found=false;
-        for (int i=historySnapshot.Count-1;i>=0 && result.Count<40;i--) {
-            var entry=historySnapshot[i];
-            if (current.TaskId!=GlobalChat && entry.TaskId!=current.TaskId) continue;
-            result.Add(entry);
-            if (entry.MessageId==current.MessageId) found=true;
+    List<ChatEntry> HistoryPage(ConversationChoice current) {
+        var entries=current!=null && current.TaskId!=GlobalChat
+            ? periodEntries.Where(e=>e.TaskId==current.TaskId).ToList() : periodEntries;
+        pageCount=Math.Max(1,(entries.Count+HistoryPageSize-1)/HistoryPageSize);
+        if (locateMessage!=null) {
+            int at=entries.FindLastIndex(e=>e.MessageId==locateMessage);
+            if (at>=0) historyPage=(entries.Count-1-at)/HistoryPageSize;
+            locateMessage=null;
         }
-        result.Reverse();
-        if (current.TaskId!=GlobalChat && result.Count==40 && !found) {
-            var original=historySnapshot.FirstOrDefault(h=>h.MessageId==current.MessageId && h.FromPet && h.TaskId==current.TaskId);
-            if (original!=null) result.Insert(0,original);
-        }
-        return result;
+        historyPage=Math.Min(historyPage,pageCount-1);
+        int end=entries.Count-historyPage*HistoryPageSize;
+        int start=Math.Max(0,end-HistoryPageSize);
+        return entries.GetRange(start,end-start);
     }
     void RenderConversation() {
         var grid = new ChatGrid(notice.MonitorDpi((int)Math.Round(panelScale*96)));
         var current = SelectedConversation;
         string id=current==null ? null : current.MessageId;
-        bool switched=renderedId!=id;
-        bool contentChanged=switched || renderedRevision!=inboxRevision;
-        if (contentChanged) visibleEntries=RecentEntries(current);
+        bool periodChanged=periodStart!=renderedStart || periodEnd!=renderedEnd;
+        bool switched=renderedId!=id || periodChanged;
+        if (renderedId!=id) historyPage=0;
+        bool contentChanged=switched || renderedPage!=historyPage || renderedRevision!=inboxRevision || locateMessage!=null;
+        if (contentChanged) visibleEntries=HistoryPage(current);
+        switched=switched || renderedPage!=historyPage;
         int oldScroll=-messageThread.AutoScrollPosition.Y;
         bool readToEnd=oldScroll+messageThread.ClientSize.Height>=messageThread.AutoScrollMinSize.Height-grid.Px(4);
         bool canType = current != null && !replying && !busy;
         bool canReply = canType && current.Pending;
         bool actionsVisible = current != null && current.Pending;
         finish.Visible = acknowledge.Visible = snoozeReply.Visible = actionsVisible;
-        bool geometryChanged=SizeConversation(visibleEntries.Count,actionsVisible,grid);
+        bool hasPages=pageCount>1;
+        olderMessages.Visible=newerMessages.Visible=hasPages;
+        olderMessages.Enabled=historyPage+1<pageCount; newerMessages.Enabled=historyPage>0;
+        previousPeriod.Enabled=!replying && periodStart.Year>1;
+        nextPeriod.Enabled=!replying && browsingDate.HasValue;
+        historyRange.Enabled=!replying;
+        if (periodChanged) {
+            var last=periodEnd.AddDays(-1);
+            historyRange.Text=periodStart.ToString(periodStart.Year==last.Year ? "d MMM" : "d MMM yyyy")+" – "+last.ToString("d MMM yyyy");
+        }
+        bool geometryChanged=SizeConversation(visibleEntries.Count,actionsVisible,grid,hasPages);
         if (contentChanged) {
             var task = current == null ? null : Get(current.TaskId);
             finish.Text = task != null && task.Submission ? "Mark submitted" : "Done"; finish.AccessibleName = finish.Text;
@@ -1214,13 +1363,18 @@ class ReminderDot : Form {
             current.TaskId == GlobalChat ? "Your desktop companion" : "Replied";
         bool styled=renderedTheme!=theme;
         if (contentChanged || geometryChanged || styled) {
-            var displayed=visibleEntries.Count>0 ? visibleEntries : new List<ChatEntry> {
-                new ChatEntry { Text=current==null ? "Your pet’s reminder messages will appear here." : profile.Greeting(),FromPet=true,AtUtc=greetingTime } };
+            var displayed=visibleEntries;
+            emptyHistory.Visible=displayed.Count==0;
+            if (displayed.Count==0) {
+                emptyHistory.Text=!browsingDate.HasValue && historySnapshot.Count==0 && current!=null && current.TaskId==GlobalChat
+                    ? profile.Greeting() : "No messages in this period.";
+            }
             if (geometryChanged || styled || switched || displayed.Count!=renderedRows.Count ||
                 displayed.Where((entry,i)=>!SameEntry(renderedRows[i].Entry,entry)).Any()) {
                 UpdateRows(displayed,grid,geometryChanged,styled,oldScroll,switched || readToEnd);
             }
             renderedRevision=inboxRevision; renderedId=id; renderedTheme=theme;
+            renderedStart=periodStart; renderedEnd=periodEnd; renderedPage=historyPage;
         }
         if (geometryChanged) RepaintConversation();
     }
@@ -1273,6 +1427,8 @@ class ReminderDot : Form {
         }
     }
     sealed class MessageBubble : Label {
+        public const TextFormatFlags LayoutFlags=TextFormatFlags.WordBreak|TextFormatFlags.NoPrefix|
+            TextFormatFlags.TextBoxControl|TextFormatFlags.NoPadding;
         public MessageBubble() { SetStyle(ControlStyles.Opaque|ControlStyles.AllPaintingInWmPaint|ControlStyles.OptimizedDoubleBuffer,true); }
         protected override void OnPaint(PaintEventArgs e) {
             e.Graphics.Clear(Parent==null ? SystemColors.Window : Parent.BackColor);
@@ -1281,7 +1437,7 @@ class ReminderDot : Form {
             using (var fill = new SolidBrush(BackColor)) e.Graphics.FillPath(fill,shape);
             TextRenderer.DrawText(e.Graphics,Text,Font,
                 new Rectangle(Padding.Left,Padding.Top,Width-Padding.Horizontal,Height-Padding.Vertical),
-                ForeColor,TextFormatFlags.WordBreak|TextFormatFlags.NoPrefix|TextFormatFlags.TextBoxControl);
+                ForeColor,LayoutFlags);
         }
     }
     void ArrangeRow(MessageRow row,ChatEntry entry,int y,ChatGrid grid,bool geometryChanged,bool styled) {
@@ -1289,12 +1445,11 @@ class ReminderDot : Form {
         bool pet = entry.FromPet;
         int available = messageThread.Width-grid.Px(25);
         if (changed || geometryChanged) {
-            int max=Math.Min(grid.Px(264),available-grid.Px(42));
-            var flags=TextFormatFlags.WordBreak|TextFormatFlags.NoPrefix|TextFormatFlags.TextBoxControl;
-            var measured=TextRenderer.MeasureText(entry.Text,notice.Font,new Size(max,Int32.MaxValue),flags);
-            row.Width=Math.Max(grid.Px(96),Math.Min(max,measured.Width)+grid.Px(18));
-            row.Height=Math.Max(grid.Px(28),measured.Height+grid.Px(12));
             row.Bubble.Padding=new Padding(grid.Px(9),grid.Px(5),grid.Px(9),grid.Px(5));
+            int max=Math.Max(1,Math.Min(grid.Px(264),available-grid.Px(42)));
+            var measured=TextRenderer.MeasureText(entry.Text,row.Bubble.Font,new Size(max,Int32.MaxValue),MessageBubble.LayoutFlags);
+            row.Width=Math.Max(1,Math.Min(max,measured.Width))+row.Bubble.Padding.Horizontal;
+            row.Height=Math.Max(grid.Px(28),measured.Height+grid.Px(12));
             row.Stamp.Font=UiFont(8,FontStyle.Regular,grid.Dpi);
         }
         if (changed || styled) {
@@ -1323,7 +1478,7 @@ class ReminderDot : Form {
     void AddChatPair(ConversationChoice current,string words,string answer) {
         try {
             store.Chat(current.MessageId,current.TaskId,words,answer);
-            SyncInbox(current.MessageId);
+            SyncAfterChat(current.MessageId);
         } catch(Exception e) { SetExpression(EyeExpression.Sad); messageStatus.Text = "I couldn’t save that message. " + e.Message; }
     }
     void AnswerQuick(string action,string words) {
@@ -1360,6 +1515,7 @@ class ReminderDot : Form {
         }
     }
     void Poll() {
+        if (lastHistoryDate!=DateTime.Today) SyncInbox();
         if (responseExpression != EyeExpression.Neutral && DateTime.UtcNow >= expressionUntil) {
             responseExpression = EyeExpression.Neutral;
             RefreshPet();
@@ -1369,7 +1525,7 @@ class ReminderDot : Form {
             var due = store.TakeDue(DateTime.UtcNow,n=>NudgeMessage(n,Get(n.Id)));
             if (due.Count == 0) return;
             var selected = SelectedConversation;
-            bool showIncoming = notice.Visible && !replying && replyBox.TextLength == 0 &&
+            bool showIncoming = notice.Visible && !browsingDate.HasValue && historyPage==0 && !replying && replyBox.TextLength == 0 &&
                 (selected == null || !selected.Pending);
             RefreshTasks(focusId); SyncInbox(showIncoming ? due[0].MessageId : null);
             if (banners.Checked) {

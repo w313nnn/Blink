@@ -14,6 +14,12 @@ Click Blink again or use the chat’s close button to leave the pet floating. To
 
 Reminders arrive silently. Turn on **Windows notification banners** in the pet’s menu if you also want a Windows notification.
 
+## Browse earlier messages
+
+By default, Blink shows the current month’s messages, starting on the first. Use the arrows beside the date range to move between periods. For a period with more than one page of messages, use **Older** and **Newer** to read through it.
+
+Click the date range to change your history settings. You can group messages by month, by six months starting in January and July, or by year starting in January. Choose a start day from 1 to 31. If a month is too short for that day, Blink uses its last day. Earlier messages stay available when you change these settings.
+
 ## Customize Blink
 
 Click the pet’s picture at the top of the conversation, or right-click the floating pet and choose **Customize pet**. The six pastel swatches are Red, Orange, Yellow, Green, Blue and Purple, in rainbow order. Click a swatch to preview it on the pet and on sample messages. Select **Save** to apply the colour to the floating pet, its tray icon and the whole conversation, including earlier messages.

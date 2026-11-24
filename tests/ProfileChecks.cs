@@ -51,9 +51,57 @@ class ProfileChecks {
             Check(PetProfile.Load(dir).Appearance==pair.Value,"migrated "+pair.Value+" persists");
         }
     }
+    static DateTime Local(int year,int month,int day) {
+        return new DateTime(year,month,day,0,0,0,DateTimeKind.Local);
+    }
+    static void CheckHistoryWindow(PetProfile profile,DateTime at,DateTime start,DateTime end,string note) {
+        var window=profile.HistoryAt(at);
+        Check(window.Start==start && window.End==end && window.Start.Kind==DateTimeKind.Local &&
+            window.End.Kind==DateTimeKind.Local,note);
+        Check(profile.HistoryAt(start).Start==start && profile.HistoryAt(end.AddTicks(-1)).Start==start &&
+            profile.HistoryAt(end).Start==end,"start is inclusive and end is exclusive for "+note);
+    }
+    static void CheckHistory(string root) {
+        string dir=Path.Combine(root,"history-settings");
+        var profile=PetProfile.Load(dir);
+        Check(PetProfile.HistoryPeriods.SequenceEqual(new[]{"Monthly","6 months","Yearly"}) &&
+            profile.HistoryPeriod=="Monthly" && profile.HistoryStartDay==1,"new profile defaults to calendar months");
+        CheckHistoryWindow(profile,Local(2026,12,31),Local(2026,12,1),Local(2027,1,1),"default month across year end");
+
+        Directory.CreateDirectory(dir);
+        string path=Path.Combine(dir,"pet-profile.json");
+        const string petFields="\"Name\":\"Luna\",\"Appearance\":\"Orange\",\"SizeChoice\":\"Medium\",\"Personality\":\"Playful\"";
+        File.WriteAllText(path,"{"+petFields+"}");
+        profile=PetProfile.Load(dir);
+        Check(profile.HistoryPeriod=="Monthly" && profile.HistoryStartDay==1 && profile.Name=="Luna","old profile gains history defaults");
+        File.WriteAllText(path,"{"+petFields+",\"HistoryPeriod\":\"Yearly\",\"HistoryStartDay\":\"invalid\"}");
+        profile=PetProfile.Load(dir);
+        Check(profile.HistoryPeriod=="Yearly" && profile.HistoryStartDay==1 && profile.Appearance=="Orange" &&
+            profile.SizeChoice=="Medium" && profile.Personality=="Playful","damaged start day preserves period and pet settings");
+        File.WriteAllText(path,"{"+petFields+",\"HistoryPeriod\":\"Weekly\",\"HistoryStartDay\":31}");
+        profile=PetProfile.Load(dir);
+        Check(profile.HistoryPeriod=="Monthly" && profile.HistoryStartDay==31,"unknown period preserves a valid start day");
+        File.WriteAllText(path,"{"+petFields+",\"HistoryStartDay\":32}");
+        Check(PetProfile.Load(dir).HistoryStartDay==1,"out of range start day falls back to the first");
+
+        CheckHistoryWindow(profile,Local(2024,2,28),Local(2024,1,31),Local(2024,2,29),"leap year before clamped day 31");
+        CheckHistoryWindow(profile,Local(2025,2,28),Local(2025,2,28),Local(2025,3,31),"short month restores the chosen day in March");
+        var april=profile.HistoryAt(Local(2025,1,31)).Shift(3);
+        Check(april.Start==Local(2025,4,30) && april.End==Local(2025,5,31) &&
+            april.Shift(-3).Start==Local(2025,1,31),"calendar navigation retains its original start day");
+        profile.HistoryPeriod="6 months"; profile.HistoryStartDay=12;
+        CheckHistoryWindow(profile,Local(2026,7,11),Local(2026,1,12),Local(2026,7,12),"January half-year");
+        CheckHistoryWindow(profile,Local(2026,7,12).ToUniversalTime(),Local(2026,7,12),Local(2027,1,12),"July half-year at local midnight");
+        profile.HistoryPeriod="Yearly";
+        CheckHistoryWindow(profile,Local(2026,1,11),Local(2025,1,12),Local(2026,1,12),"yearly before chosen January day");
+        profile.Save(dir);
+        var saved=PetProfile.Load(dir);
+        Check(saved.HistoryPeriod=="Yearly" && saved.HistoryStartDay==12 && saved.Name=="Luna","history settings persist with pet identity");
+    }
     static void Main(string[] args) {
         string root=Path.GetFullPath(args[0]);
         CheckThemes(root);
+        CheckHistory(root);
         string first=Path.Combine(root,"first"),second=Path.Combine(root,"second");
         Directory.CreateDirectory(first); Directory.CreateDirectory(second);
         var defaults=PetProfile.Load(first);
