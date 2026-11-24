@@ -1,8 +1,6 @@
-# Blink
+<h1 align="center"><img src="assets/blink-logo.png" width="155" alt="Blink"></h1>
 
-<img src="assets/blink-logo.png" width="155" alt="Blink’s mint chat bubble, red notification dot and rounded wordmark">
-
-Blink is a small Windows desktop pet for tasks and deadlines. When a reminder is due, a red dot appears on the pet. Click it to read and reply in the same conversation. Reminders work offline without a ChatGPT subscription or an API key.
+<p align="center">A small Windows desktop pet that messages you when tasks and deadlines are due.<br>Reminders work offline without a ChatGPT subscription or an API key.</p>
 
 ## Get started on Windows
 
