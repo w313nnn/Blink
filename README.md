@@ -6,7 +6,7 @@
 
 Download the [Windows prototype ZIP](https://github.com/w313nnn/Blink/blob/main/dist/Blink-Windows-Prototype.zip) and extract it. If an older copy is running, right-click its pet and choose **Quit Blink**. Open **Blink.exe** in the extracted folder.
 
-1. Click Blink to open the conversation. Choose **New reminder**, then **Test in 10 seconds**.
+1. Click Blink to open the conversation. Choose **More**, then **New reminder** and **Test in 10 seconds**.
 2. Choose **Hide** to close the editor. About ten seconds later, a red dot appears on Blink. You can keep working in your current window.
 3. Click the pet, type “Got it” and send your reply. You can also close the conversation and reply later. The red dot stays until you answer.
 
@@ -25,7 +25,7 @@ You can send any of these messages to add or change a task.
 - “Cancel the review chapter five task”
 - “Add a task to submit the art report by tomorrow at noon”
 
-If several tasks match, Blink asks which one you mean. To see what’s coming up, select **Upcoming** or ask “What reminders do I have?”, “What’s due today?” or “What should I work on now?”
+If several tasks match, Blink asks which one you mean. To see what’s coming up, select **More** and **Upcoming** or ask “What reminders do I have?”, “What’s due today?” or “What should I work on now?”
 
 Type **open my checklist** or choose **Open checklist file** from the pet’s menu to read your active tasks, deadlines and next reminders. Make changes in the conversation. Blink updates the file and removes a task from the checklist when you mark it done.
 
@@ -45,7 +45,7 @@ Blink sends a Windows notification when a reminder is due. Windows controls its 
 
 ### Earlier messages
 
-By default, Blink shows the current month’s messages, starting on the first. Use the arrows beside the date range to move between periods. For a period with more than one page of messages, use **Older** and **Newer** to read through it.
+By default, Blink shows the current month’s messages, starting on the first. Choose **More** and use the arrows beside the date range to move between periods. For a period with more than one page of messages, use **Older** and **Newer** to read through it.
 
 Click the date range to change your history settings. You can group messages by month, by six months starting in January and July, or by year starting in January. Choose a start day from 1 to 31. If a month is too short for that day, Blink uses its last day. Earlier messages stay available when you change these settings.
 

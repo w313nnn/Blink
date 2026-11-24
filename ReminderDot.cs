@@ -1036,6 +1036,8 @@ class ReminderDot : Form {
         messageStatus.AutoEllipsis = true; notice.Controls.Add(messageStatus);
         chatRule.BackColor = theme.Border;
         BoundsInUnits(chatRule,1,63,386,1); notice.Controls.Add(chatRule);
+        moreOptions=ButtonAt(notice,"More",282,13,56,30,()=>{ optionsOpen=!optionsOpen; RenderNotice(); },false);
+        moreOptions.AccessibleName="Conversation options";
         upcoming = ButtonAt(notice,"Upcoming",181,74,81,26,ShowUpcoming,false);
         newReminder = ButtonAt(notice,"New reminder",269,74,104,26,ShowEditor,false);
         notice.Controls.Add(conversationCaption);
@@ -1091,7 +1093,8 @@ class ReminderDot : Form {
         }
     }
     int lastChatDpi;
-    bool lastActions, lastHasPages;
+    Button moreOptions;
+    bool optionsOpen, lastOptionsOpen, lastActions, lastHasPages;
     bool SizeConversation(int messages,bool actions,ChatGrid grid,bool hasPages) {
         bool dpiChanged=lastChatDpi!=grid.Dpi;
         if (dpiChanged) {
@@ -1110,12 +1113,14 @@ class ReminderDot : Form {
         if (actions && messages<=1) height = Math.Min(grid.Units(area.Height)-12,height+37);
         var targetSize = new Size(grid.Px(width),grid.Px(height));
         bool resized = notice.ClientSize != targetSize;
-        if (!resized && !dpiChanged && actions==lastActions && hasPages==lastHasPages) return false;
+        if (!resized && !dpiChanged && actions==lastActions && hasPages==lastHasPages && optionsOpen==lastOptionsOpen) return false;
+        lastOptionsOpen=optionsOpen;
         lastActions=actions; lastHasPages=hasPages;
         if (resized) notice.ClientSize = targetSize;
         grid.Place(avatar,14,12,38,38);
-        grid.Place(noticeName,61,8,width-120,28);
-        grid.Place(messageStatus,62,35,width-110,19);
+        grid.Place(moreOptions,width-106,13,56,30);
+        grid.Place(noticeName,61,8,width-172,28);
+        grid.Place(messageStatus,62,35,width-172,19);
         grid.Place(closeChat,width-44,13,30,30);
         grid.Place(chatRule,1,63,width-2,1);
         grid.Place(newReminder,width-119,74,104,26);
@@ -1131,8 +1136,9 @@ class ReminderDot : Form {
         int y = height-93;
         grid.Place(acknowledge,13,y,90,26); grid.Place(snoozeReply,109,y,104,26);
         grid.Place(finish,219,y,Math.Min(width-232,125),26);
-        grid.Place(messageThread,10,140,width-20,(actions ? y : height-56)-147);
-        grid.Place(emptyHistory,20,143,width-40,(actions ? y : height-56)-153);
+        int top=optionsOpen ? 140 : 70;
+        grid.Place(messageThread,10,top,width-20,(actions ? y : height-56)-top-7);
+        grid.Place(emptyHistory,20,top+3,width-40,(actions ? y : height-56)-top-13);
         if (resized && notice.Visible) Place(notice);
         return true;
     }
@@ -1297,7 +1303,10 @@ class ReminderDot : Form {
         bool actionsVisible = current != null && current.Pending;
         finish.Visible = acknowledge.Visible = snoozeReply.Visible = actionsVisible;
         bool hasPages=pageCount>1;
-        olderMessages.Visible=newerMessages.Visible=hasPages;
+        moreOptions.Text=optionsOpen ? "Less" : "More";
+        conversationCaption.Visible=upcoming.Visible=newReminder.Visible=optionsOpen;
+        previousPeriod.Visible=historyRange.Visible=nextPeriod.Visible=optionsOpen;
+        olderMessages.Visible=newerMessages.Visible=optionsOpen && hasPages;
         olderMessages.Enabled=historyPage+1<pageCount; newerMessages.Enabled=historyPage>0;
         previousPeriod.Enabled=!replying && periodStart.Year>1;
         nextPeriod.Enabled=!replying && browsingDate.HasValue;

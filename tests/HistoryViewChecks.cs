@@ -49,6 +49,8 @@ class HistoryViewChecks {
         Application.EnableVisualStyles();
         using(var pet=new ReminderDot(folder)) {
             pet.Show(); Call(pet,"OpenInbox",new object[]{null});
+            Check(!Field<Button>(pet,"historyRange").Visible,"History tools should start collapsed");
+            Click(pet,"moreOptions");
             var store=Field<TaskStore>(pet,"store");
             var caption=Field<Label>(pet,"conversationCaption");
             var reply=Field<TextBox>(pet,"replyBox");
