@@ -8,11 +8,11 @@ Download the [Windows prototype ZIP](https://github.com/w313nnn/Blink/blob/main/
 
 1. Click Blink to open the conversation. Choose **More**, then **New reminder** and **Test in 10 seconds**.
 2. Choose **Hide** to close the editor. About ten seconds later, a red dot appears on Blink. You can keep working in your current window.
-3. Click the pet, type “Got it” and send your reply. You can also close the conversation and reply later. The red dot stays until you answer.
+3. Click the pet, type “Got it” and send your reply. You can also close the conversation and reply later. The red dot clears when you view the reminder. You can answer later.
 
 ## Set a reminder in chat
 
-Blink understands common requests on its own, including “Remind me to stretch in 20 minutes” and “pls remind to drink water on 2:13pm later”. For a clock time alone, Blink uses the next occurrence in your local time zone and confirms the date.
+Blink understands common requests on its own, including “Remind me to stretch in 20 minutes” and “pls remind to drink water on 2:13pm later”. Try “submit the report by this Friday at 16:30” or “call Mum the first week of July”. For a week, Blink asks which day you mean. You can enter dates as YYYY-MM-DD or DD-MM-YYYY. For a clock time alone, Blink uses the next occurrence in your local time zone and confirms the date.
 
 If you give a date that has passed, you can correct it in your next message. For example, after “drink water on 12:40am 21th November 2026”, a reply of “2026-11-25” changes the date and keeps “drink water” and 12:40 am. If the corrected time has passed too, Blink asks for a future time.
 

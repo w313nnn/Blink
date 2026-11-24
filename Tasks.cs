@@ -32,6 +32,7 @@ public sealed class Nudge {
     public string Kind { get; set; }
     public DateTime SentUtc { get; set; }
     public string Text { get; set; }
+    public bool IsRead { get; set; }
     public bool HasExactText { get; set; }
 
     public Nudge Copy() { return (Nudge)MemberwiseClone(); }
@@ -127,6 +128,21 @@ public sealed partial class TaskStore {
     }
     public List<Nudge> Inbox {
         get { lock (gate) return data.Inbox.OrderBy(n => n.SentUtc).Select(n => n.Copy()).ToList(); }
+    }
+    public void MarkRead(HashSet<string> messageIds) {
+        lock(gate) {
+            var next=data.Copy();
+            bool changed=false;
+            for(int i=0;i<next.Inbox.Count;i++) {
+                var n=next.Inbox[i];
+                if(n.IsRead || !messageIds.Contains(n.MessageId)) continue;
+                var read=n.Copy();
+                read.IsRead=true;
+                next.Inbox[i]=read;
+                changed=true;
+            }
+            if(changed) Commit(next);
+        }
     }
     public List<ChatEntry> History {
         get { lock (gate) return data.History.Select(e => e.Copy()).ToList(); }

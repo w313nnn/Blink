@@ -19,6 +19,10 @@ class TaskStoreChecks {
         var sample = store.Items.Single();
         var got = store.TakeDue(now);
         Check(got.Single().Kind == "check-in", "legacy reminder fires");
+        Check(!got.Single().IsRead,"delivered reminder starts unread");
+        store.MarkRead(new System.Collections.Generic.HashSet<string>{got.Single().MessageId});
+        store=new TaskStore(path);
+        Check(store.Inbox.Single().IsRead,"reading persists and leaves the reminder available for reply");
         store.Delete(sample.Id);
         store = new TaskStore(path);
         Check(store.Items.Count == 0, "migration does not repeat on restart");

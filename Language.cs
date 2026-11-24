@@ -21,7 +21,7 @@ class Intent {
 }
 
 static class Language {
-    const string Day = @"(?:today|tomorrow|(?:next\s+)?(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)|\d{4}-\d{2}-\d{2})";
+    const string Day = @"(?:today|tomorrow|(?:(?:next|this)\s+)?(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)|\d{4}-\d{2}-\d{2})";
     const string Hour = @"(?:noon|midnight|(?:[01]?\d|2[0-3])(?::[0-5]\d)?\s*(?:am|pm)?)";
     const string ExplicitClock = @"(?:noon|midnight|(?:[01]?\d|2[0-3]):[0-5]\d(?:\s*(?:am|pm))?|(?:0?[1-9]|1[0-2])\s*(?:am|pm))";
     const string ReminderPrefix = @"(?:(?:please|pls|plz)\s+)?remind(?:\s+me)?";
@@ -45,7 +45,7 @@ static class Language {
     }
     public static bool IsNewRequest(string text) {
         string request=Words(text);
-        if(TimeCorrection(request).Success) return false;
+        if(TimeCorrection(request).Success || Find(request,@"^(?:the\s+)?\d{1,2}(?:st|nd|rd|th)?(?:\s+(?:at\s+)?"+Hour+")?$").Success) return false;
         if(Find(request,@"^(?:change it to|remind me again)\b").Success) return false;
         if(TaskCommands.CaptureTitle(request)!=null ||
             Find(request,@"^(?:(?:could|can|would) you\s+)?(?:"+ReminderPrefix+@"(?:\s|$)|(?:please\s+)?(?:set|add|create|schedule)\s+(?:(?:a|an|my|another|new)\s+)*(?:reminder|task|deadline)\b|i\s+(?:(?:need|want|have)\s+to|wanna)\s+|(?:rename|cancel|remove|delete|reschedule|postpone|change|move)\s+)").Success ||
@@ -61,6 +61,16 @@ static class Language {
     static string Iso(int year,int month,int day) {
         return String.Format(CultureInfo.InvariantCulture,"{0:D4}-{1:D2}-{2:D2}",year,month,day);
     }
+    const string MonthWeek=@"\b(?:the\s+)?(?<week>first|second|third|fourth|1st|2nd|3rd|4th)\s+week\s+of\s+(?<month>"+MonthName+@")(?:\s+(?<year>\d{4}))?\b";
+    static DateTime WeekStart(Match week,DateTime now) {
+        string[] names={"first","second","third","fourth"};
+        string ordinal=week.Groups["week"].Value.ToLowerInvariant();
+        int index=Char.IsDigit(ordinal[0]) ? ordinal[0]-'1' : Array.IndexOf(names,ordinal);
+        int month=DateTime.ParseExact(week.Groups["month"].Value.Substring(0,3),"MMM",CultureInfo.InvariantCulture).Month;
+        int year=week.Groups["year"].Success ? int.Parse(week.Groups["year"].Value) : now.Year;
+        var start=new DateTime(Math.Max(1,year),month,1+7*index);
+        return !week.Groups["year"].Success && start.AddDays(6)<now.Date ? start.AddYears(1) : start;
+    }
     static string NormalizeSchedule(string text,DateTime now) {
         string request=Regex.Replace(text,@"^(?:(?:can|could|would)\s+you\s+)?(?:(?:please|pls|plz)\s+)?(?:set|add|create|schedule)\s+(?:me\s+)?(?:a(?:nother)?\s+|my\s+)?reminder(?:\s+(?:for\s+me\s+)?(?:to|for))?\s+","remind me to ",Options);
         request=Regex.Replace(request,WrittenDate,m=>{
@@ -73,6 +83,8 @@ static class Language {
             // An ISO date already contains a numeric month/day pair after its first dash.
             if(m.Index>0 && request[m.Index-1]=='-') return m.Value;
             int first=int.Parse(m.Groups["first"].Value),second=int.Parse(m.Groups["second"].Value);
+            if(m.Groups["sep"].Value=="-" && m.Groups["year"].Length==4)
+                return Iso(int.Parse(m.Groups["year"].Value),second,first);
             if(first!=second && first<=12 && second<=12) return m.Value;
             if(m.Groups["year"].Success && m.Groups["year"].Value.Length!=4) return m.Value;
             int year=m.Groups["year"].Success ? int.Parse(m.Groups["year"].Value) : now.Year;
@@ -114,7 +126,7 @@ static class Language {
         if(p.Length>0) {
             if(h<1 || h>12) return false;
             h=h%12+(p=="pm"?12:0);
-        } else if(h>=1 && h<=12 && token[0]!='0') {
+        } else if(h>=1 && h<=12 && token[0]!='0' && !(token.Length==5 && token[2]==':')) {
             problem="Do you mean " + token + " pm? You can also reply “" + token + " am”.";
             return false;
         }
@@ -146,11 +158,11 @@ static class Language {
         else if(day!="" && day!="today") {
             if(!DateTime.TryParseExact(day,"yyyy-MM-dd",CultureInfo.InvariantCulture,DateTimeStyles.None,out date)) {
                 DayOfWeek weekday;
-                if(!Enum.TryParse<DayOfWeek>(day.Replace("next ",""),true,out weekday)) {
+                if(!Enum.TryParse<DayOfWeek>(day.Replace("next ","").Replace("this ",""),true,out weekday)) {
                     problem="Which date do you mean?"; return null;
                 }
                 int difference=((int)weekday-(int)now.DayOfWeek+7)%7;
-                if(difference==0 && (day.StartsWith("next ") || now.TimeOfDay>=time)) difference=7;
+                if(difference==0 && (day.StartsWith("next ") || (!day.StartsWith("this ") && now.TimeOfDay>=time))) difference=7;
                 date=now.Date.AddDays(difference);
             }
         }
@@ -172,6 +184,29 @@ static class Language {
         value=Words(Regex.Replace(value,@"\s+(?:instead|please)$","",Options));
         var correction=TimeCorrection(value);
         if(correction.Success) value=correction.Groups["clock"].Value;
+        var week=Find(context,MonthWeek);
+        if(week.Success) {
+            var start=WeekStart(week,now);
+            var namedDate=Find(answer,WrittenDate);
+            if(namedDate.Success && !namedDate.Groups["y"].Success && Find(value,@"^\d{4}-").Success)
+                value=start.Year.ToString("D4")+value.Substring(4);
+            var choice=Find(value,@"^(?:the\s+)?(?<d>\d{1,2})(?:st|nd|rd|th)?(?:\s+(?:at\s+)?(?<t>"+Hour+@"))?$");
+            if(choice.Success) {
+                int number=int.Parse(choice.Groups["d"].Value);
+                if(number<start.Day || number>start.Day+6) return context;
+                value=Iso(start.Year,start.Month,number)+(choice.Groups["t"].Success ? " at "+choice.Groups["t"].Value : "");
+            }
+            if(!Find(value,"^"+Day+@"(?:\s+(?:at\s+)?"+Hour+")?$").Success) return context;
+            if(!Find(value,@"^\d{4}-").Success) {
+                DayOfWeek weekday;
+                if(!Enum.TryParse<DayOfWeek>(value.Split(' ')[0],true,out weekday)) return context;
+                value=Regex.Replace(value,@"^\w+",start.AddDays(((int)weekday-(int)start.DayOfWeek+7)%7).ToString("yyyy-MM-dd"),Options);
+            }
+            DateTime picked;
+            if(!DateTime.TryParseExact(value.Substring(0,10),"yyyy-MM-dd",CultureInfo.InvariantCulture,DateTimeStyles.None,out picked) ||
+                picked<start || picked>start.AddDays(6)) return context;
+            return context.Substring(0,week.Index)+value+context.Substring(week.Index+week.Length);
+        }
         var parts=Find(value,@"^(?:(?<day>"+Day+@")(?:\s+(?:at\s+)?)?)?(?<clock>"+Hour+@")?$");
         string day=parts.Groups["day"].Value,clock=parts.Groups["clock"].Value.Trim();
         var other=UnclearDate(context);
@@ -281,6 +316,11 @@ static class Language {
         if (list != null) return list;
         if(Find(request,@"\b(?:not|never|don['’]?t|didn['’]?t|haven['’]?t|hasn['’]?t|won['’]?t|can['’]?t)\b").Success)
             return Ask("Which reminder should I set or change? You can also manage it in the task list.");
+        var week=Find(request,MonthWeek);
+        if(week.Success) {
+            var start=WeekStart(week,now);
+            return Ask("Which day from "+start.Day+" to "+start.AddDays(6).ToString("d MMMM yyyy",CultureInfo.InvariantCulture)+" should I use? You can reply with the day and time.");
+        }
         var other=UnclearDate(request);
         if(other.Success)
             return Ask("Which date do you mean by “"+other.Value+"”? Reply with YYYY-MM-DD.");
@@ -371,7 +411,7 @@ static class Language {
             var history=Regex.Matches(context,@"^User: (.+)$",RegexOptions.Multiline).Cast<Match>().Select(m=>m.Groups[1].Value.Trim()).ToArray();
             string original=NormalizeSchedule(history.Length==0?context:history[0],localNow);
             foreach(string previous in history.Skip(1)) original=ResolveTimeReply(original,previous,localNow)??original;
-            string clarified=ResolveTimeReply(original,request,localNow);
+            string clarified=ResolveTimeReply(original,text,localNow);
             if(clarified!=null) request=clarified;
             else if(context.Contains("Blink: Which task do you mean?") || context.Contains("Blink: I couldn’t find an active task matching")) {
                 string issue;

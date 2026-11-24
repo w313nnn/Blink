@@ -51,12 +51,23 @@ class LanguageChecks {
     }
     static void Main() {
         CheckCalendarClarification();
+        CheckReminder(Read("remind me to call Mum on 04-07-2027 at 11:15"),"call Mum",new DateTime(2027,7,4,11,15,0),"day first date and 24 hour clock");
+        CheckReminder(Read("remind me to call Mum this Wednesday at 4 pm"),"call Mum",Now.Date.AddDays(1).AddHours(16),"this Wednesday");
+        string friday="submit report by this Friday";
+        var deadline=Read("5 pm",null,Turn(friday,Read(friday)));
+        Check(deadline.DeadlineUtc==Now.Date.AddDays(3).AddHours(17).ToUniversalTime(),"by this Friday retains deadline");
+        Check(!Language.IsNewRequest("the 2nd at 14:30"),"a conversational ordinal answers the pending question");
+        string week="remind me to call Mum the first week of July";
+        var pick=Read(week);
+        Check(pick.Action=="ask" && pick.Reply.Contains("7 July 2027"),"week of month asks for day");
+        CheckReminder(Read("the 2nd at 14:30",null,Turn(week,pick)),"call Mum",new DateTime(2027,7,2,14,30,0),"week reply preserves task");
         var sent=new DateTime(2026,11,25,1,54,10,DateTimeKind.Local);
         string first="remind me at 01:54am on 25/11/2026 to drink water";
         string correction="same date but the time is 01:55am";
         Check(!Language.IsNewRequest(correction),"time correction stays in conversation");
         CheckReminder(At(sent,correction,Turn(first,At(sent,first))),"drink water",sent.Date.AddMinutes(115),"same date preserves the task");
         Check(At(sent,correction).Action=="ask","orphaned correction cannot become a task");
+        CheckReminder(Read("July 2 at 2 pm",null,Turn(week,pick)),"call Mum",new DateTime(2027,7,2,14,0,0),"month reply inherits resolved year");
         var simple=Read("Remind me to stretch in 20 minutes");
         Check(simple.Action=="create" && simple.Title=="stretch" && simple.CheckUtc==Now.ToUniversalTime().AddMinutes(20),"relative seconds");
         const string waterRequest="pls remind to drink water on 2:13pm later";

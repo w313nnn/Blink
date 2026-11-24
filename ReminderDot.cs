@@ -624,7 +624,7 @@ class ReminderDot : Form {
             if (editor.Visible) Place(editor);
         } finally { tasks.EndUpdate(); refreshing = false; }
     }
-    static string Time(DateTime utc) { return utc.ToLocalTime().ToString("ddd d MMM, h:mm tt"); }
+    static string Time(DateTime utc) { return utc.ToLocalTime().ToString("ddd d MMM yyyy, h:mm tt"); }
     static string Describe(TaskItem t) {
         var parts = new List<string> { t.Title + (t.Stage == "draft ready" ? " (draft ready)" : "") };
         if (!String.IsNullOrWhiteSpace(t.File) && t.Title.IndexOf(t.File,StringComparison.OrdinalIgnoreCase)<0) parts.Add("File: " + t.File);
@@ -1149,15 +1149,16 @@ class ReminderDot : Form {
     }
     int badgeCount=-1;
     void UpdateBadge(bool force=false) {
-        if (!force && badgeCount==outstanding.Count) return;
-        badgeCount=outstanding.Count;
-        urgent = outstanding.Count > 0;
-        string caption = profile.Name + (urgent ? " · " + outstanding.Count + " awaiting reply" : " · desktop reminders");
+        int unread=outstanding.Count(n=>!n.IsRead);
+        if (!force && badgeCount==unread) return;
+        badgeCount=unread;
+        urgent = unread > 0;
+        string caption = profile.Name + (urgent ? " · " + unread + " unread" : " · desktop reminders");
         tray.Text = caption.Substring(0,Math.Min(63,caption.Length));
-        AccessibleDescription = urgent ? "Waiting for your reply" : "Desktop reminder pet";
+        AccessibleDescription = urgent ? "Unread reminder" : "Desktop reminder pet";
         hints.SetToolTip(this,caption);
         tray.Icon = urgent ? waitingIcon : trayIcon ?? SystemIcons.Information;
-        if (messagesButton != null) messagesButton.Text = urgent ? "Messages (" + outstanding.Count + ")" : "Messages";
+        if (messagesButton != null) messagesButton.Text = urgent ? "Messages (" + unread + ")" : "Messages";
         UpdatePetRegion();
         RefreshPet();
     }
@@ -1478,6 +1479,19 @@ class ReminderDot : Form {
             }
         }
     }
+    void ReadVisibleReminders() {
+        if (!urgent || !notice.Visible || !notice.ContainsFocus) return;
+        var viewed=new HashSet<string>();
+        foreach (var row in renderedRows) {
+            if(row.Entry.FromPet && messageThread.ClientRectangle.IntersectsWith(row.Bubble.Bounds)
+                && outstanding.Any(n=>!n.IsRead && n.MessageId==row.Entry.MessageId && n.SentUtc==row.Entry.AtUtc))
+                viewed.Add(row.Entry.MessageId);
+        }
+        if(viewed.Count==0) return;
+        store.MarkRead(viewed);
+        outstanding.Clear(); outstanding.AddRange(store.Inbox);
+        UpdateBadge();
+    }
     void Poll() {
         if (lastHistoryDate!=DateTime.Today) SyncInbox();
         if (responseExpression != EyeExpression.Neutral && DateTime.UtcNow >= expressionUntil) {
@@ -1486,6 +1500,7 @@ class ReminderDot : Form {
         }
         if (DateTime.UtcNow < nextPoll) return;
         try {
+            ReadVisibleReminders();
             var due = store.TakeDue(DateTime.UtcNow,n=>NudgeMessage(n,Get(n.Id)));
             if (due.Count == 0) return;
             var selected = SelectedConversation;
