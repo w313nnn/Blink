@@ -29,7 +29,7 @@ static class Language {
     const string MonthDay = @"(?<d>\d{1,2})(?:st|nd|rd|th)?";
     const string WrittenDate = @"\b(?:"+MonthDay+@"\s+(?:of\s+)?(?<m>"+MonthName+@")\.?|(?<m>"+MonthName+@")\.?\s+"+MonthDay+@")(?:(?:,\s*|\s+)(?<y>\d{4}))?(?!\w)";
     const string NumericDate = @"\b(?<first>\d{1,2})(?<sep>[/.-])(?<second>\d{1,2})(?:\k<sep>(?<year>\d{4}|\d{2}))?(?![\d/.-]\d|\w)";
-    const string Span = @"(?<amount>\d{1,5}|a|an|one)\s+(?<unit>seconds?|secs?|minutes?|mins?|hours?|hrs?|days?|weeks?)";
+    const string Span = @"(?<amount>\d{1,5}|a|an|one|two|three|four|five|six|seven|eight|nine|ten|fifteen|twenty|thirty)\s+(?<unit>seconds?|secs?|minutes?|mins?|hours?|hrs?|days?|weeks?)";
     const string Timing = @"\b(?:in\s+" + Span + "|" + Day + @"(?:\s+(?:at\s+)?" + Hour + @")?|at\s+" + Hour + @"|(?:on\s+)?" + ExplicitClock + @")(?![\w:])";
     const string OtherDate = @"\b(?:(?:next|this|last|coming|following)\s+(?:weekend|week|month|year)|(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+\d{1,2}(?:st|nd|rd|th)?|\d{1,2}(?:st|nd|rd|th)?\s+(?:january|february|march|april|may|june|july|august|september|october|november|december)|(?:on\s+)?the\s+\d{1,2}(?:st|nd|rd|th)|\d{1,2}/\d{1,2}(?:/\d{2,4})?|day after tomorrow|yesterday|christmas|thanksgiving|new year(?:'s day)?|weekends?)\b";
     static readonly RegexOptions Options = RegexOptions.IgnoreCase | RegexOptions.CultureInvariant;
@@ -73,6 +73,9 @@ static class Language {
     }
     static string NormalizeSchedule(string text,DateTime now) {
         string request=Regex.Replace(text,@"^(?:(?:can|could|would)\s+you\s+)?(?:(?:please|pls|plz)\s+)?(?:set|add|create|schedule)\s+(?:me\s+)?(?:a(?:nother)?\s+|my\s+)?reminder(?:\s+(?:for\s+me\s+)?(?:to|for))?\s+","remind me to ",Options);
+        // Route everyday delay phrases through the same clock as "in 5 minutes".
+        request=Regex.Replace(request,@"\b(?:after\s+(?<delay>"+Span+@")|(?:in\s+)?(?<delay>"+Span+@")\s+from\s+now)(?=\s*(?:$|[.!?,]|to\s+))",
+            m=>"in "+m.Groups["delay"].Value,Options);
         request=Regex.Replace(request,WrittenDate,m=>{
             string month=m.Groups["m"].Value.Substring(0,3);
             int monthNumber=DateTime.ParseExact(month,"MMM",CultureInfo.InvariantCulture).Month;
@@ -104,7 +107,24 @@ static class Language {
 
     static TimeSpan Duration(Match m) {
         int n;
-        if (!int.TryParse(m.Groups["amount"].Value, out n)) n=1;
+        string amount=m.Groups["amount"].Value.ToLowerInvariant();
+        if (!int.TryParse(amount,out n)) {
+            switch(amount) {
+                case "two": n=2; break;
+                case "three": n=3; break;
+                case "four": n=4; break;
+                case "five": n=5; break;
+                case "six": n=6; break;
+                case "seven": n=7; break;
+                case "eight": n=8; break;
+                case "nine": n=9; break;
+                case "ten": n=10; break;
+                case "fifteen": n=15; break;
+                case "twenty": n=20; break;
+                case "thirty": n=30; break;
+                default: n=1; break;
+            }
+        }
         switch (char.ToLowerInvariant(m.Groups["unit"].Value[0])) {
             case 's': return TimeSpan.FromSeconds(n);
             case 'm': return TimeSpan.FromMinutes(n);

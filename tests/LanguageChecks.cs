@@ -51,6 +51,12 @@ class LanguageChecks {
     }
     static void Main() {
         CheckCalendarClarification();
+        foreach(string delay in new[]{"after 1 minute","after a minute","a minute from now"})
+            CheckReminder(Read("remind me to drink water "+delay),"drink water",Now.AddMinutes(1),delay);
+        Check(Language.IsNewRequest("remind me to drink water after 1 minute"),"a pending check-in does not capture a new reminder");
+        CheckReminder(Read("remind me after five minutes to drink water"),"drink water",Now.AddMinutes(5),"delay before task");
+        var when=Read("remind me to drink water");
+        CheckReminder(Read("after two minutes",null,Turn("remind me to drink water",when)),"drink water",Now.AddMinutes(2),"conversational follow-up");
         CheckReminder(Read("remind me to call Mum on 04-07-2027 at 11:15"),"call Mum",new DateTime(2027,7,4,11,15,0),"day first date and 24 hour clock");
         CheckReminder(Read("remind me to call Mum this Wednesday at 4 pm"),"call Mum",Now.Date.AddDays(1).AddHours(16),"this Wednesday");
         string friday="submit report by this Friday";
