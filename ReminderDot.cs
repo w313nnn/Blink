@@ -94,7 +94,7 @@ class ReminderDot : Form {
     readonly Label messageStatus = new Label();
     readonly Label emptyHistory = new Label();
     Button previousPeriod, historyRange, nextPeriod, olderMessages, newerMessages;
-    readonly ComboBox eventList = new ComboBox();
+    readonly Label conversationCaption = new Label { Text="Messages", AutoEllipsis=true, UseMnemonic=false, TextAlign=ContentAlignment.MiddleLeft };
     readonly List<Nudge> outstanding = new List<Nudge>();
     readonly Timer timer = new Timer();
     readonly Timer blink = new Timer();
@@ -1011,11 +1011,11 @@ class ReminderDot : Form {
         if (Persist(t)) { SyncInbox(); respond(reply); }
     }
     sealed class ConversationChoice {
-        public string MessageId, TaskId, Label;
+        public string MessageId, TaskId;
         public bool Pending;
-        public override string ToString() { return Label; }
+
     }
-    ConversationChoice SelectedConversation { get { return eventList.SelectedItem as ConversationChoice; } }
+    ConversationChoice SelectedConversation;
 
     void BuildNotice() {
         Surface(notice,"Blink messages",388,418);
@@ -1038,15 +1038,7 @@ class ReminderDot : Form {
         BoundsInUnits(chatRule,1,63,386,1); notice.Controls.Add(chatRule);
         upcoming = ButtonAt(notice,"Upcoming",181,74,81,26,ShowUpcoming,false);
         newReminder = ButtonAt(notice,"New reminder",269,74,104,26,ShowEditor,false);
-        eventList.DropDownStyle = ComboBoxStyle.DropDownList;
-        eventList.FlatStyle = FlatStyle.Standard; eventList.BackColor = notice.BackColor;
-        eventList.AccessibleName = "Messages"; BoundsInUnits(eventList,14,75,158,26);
-        notice.Controls.Add(eventList);
-        eventList.SelectedIndexChanged += delegate {
-            if (rebuilding) return;
-            historyPage=0;
-            SelectDraft(SelectedConversation); RenderNotice();
-        };
+        notice.Controls.Add(conversationCaption);
         previousPeriod=ButtonAt(notice,"‹",14,105,26,24,()=>MoveHistoryPeriod(-1),false);
         historyRange=ButtonAt(notice,"",44,105,194,24,EditHistoryPeriod,false);
         nextPeriod=ButtonAt(notice,"›",242,105,26,24,()=>MoveHistoryPeriod(1),false);
@@ -1128,7 +1120,7 @@ class ReminderDot : Form {
         grid.Place(chatRule,1,63,width-2,1);
         grid.Place(newReminder,width-119,74,104,26);
         grid.Place(upcoming,width-207,74,81,26);
-        grid.Place(eventList,14,75,width-230,26);
+        grid.Place(conversationCaption,14,75,width-230,26);
         int navEnd=hasPages ? width-116 : width-14;
         grid.Place(previousPeriod,14,106,26,24); grid.Place(historyRange,44,106,navEnd-74,24);
         grid.Place(nextPeriod,navEnd-26,106,26,24);
@@ -1238,58 +1230,22 @@ class ReminderDot : Form {
             periodStart=window.Start; periodEnd=window.End;
             if (periodChanged) historyPage=0;
             periodEntries=historySnapshot.Where(entry=>InHistoryPeriod(entry.AtUtc)).OrderBy(entry=>entry.AtUtc).ToList();
-            SyncChoices(version);
+            inboxRevision=version;
         }
         rebuilding=true;
         try {
-            var choices=eventList.Items.Cast<ConversationChoice>();
-            var target=choices.FirstOrDefault(c=>c.MessageId==(preferred ?? oldId)) ??
-                (previous==null ? null : choices.FirstOrDefault(c=>c.TaskId==previous.TaskId)) ??
-                choices.FirstOrDefault(c=>c.TaskId==GlobalChat);
-            if (target!=null && target!=SelectedConversation) eventList.SelectedItem=target;
+            var requested=preferred ?? oldId;
+            var pending=outstanding.FirstOrDefault(n=>n.MessageId==requested &&
+                (InHistoryPeriod(n.SentUtc) || periodEntries.Any(e=>e.MessageId==requested)));
+            var target=pending==null
+                ? new ConversationChoice { MessageId=GlobalChat, TaskId=GlobalChat }
+                : new ConversationChoice { MessageId=pending.MessageId, TaskId=pending.Id, Pending=true };
+            SelectedConversation=target;
+            conversationCaption.Text=pending==null ? "Messages" : "Reply to " + pending.Title;
             SelectDraft(target);
         } finally { rebuilding=false; }
         UpdateBadge(); RenderNotice();
     }
-    void SyncChoices(long version) {
-        // A question can still await a reply when the conversation continues into a later period.
-        var pendingTimes=new Dictionary<string,DateTime>();
-        if (outstanding.Count>0) {
-            var pendingIds=new HashSet<string>(outstanding.Select(n=>n.MessageId));
-            foreach (var e in periodEntries)
-                if (pendingIds.Contains(e.MessageId)) pendingTimes[e.MessageId]=e.AtUtc;
-            foreach (var n in outstanding)
-                if (InHistoryPeriod(n.SentUtc)) pendingTimes[n.MessageId]=n.SentUtc;
-        }
-        var choices = outstanding.Where(n=>pendingTimes.ContainsKey(n.MessageId)).Select(n=>new ConversationChoice {
-            MessageId=n.MessageId, TaskId=n.Id, Pending=true,
-            Label=n.Title + "   ·   " + pendingTimes[n.MessageId].ToLocalTime().ToString("g") + "   ·   Awaiting reply"
-        }).ToList();
-        var titleById = store.Items.ToDictionary(x=>x.Id,x=>x.Title);
-        choices.Add(new ConversationChoice { MessageId=GlobalChat, TaskId=GlobalChat, Label="All messages" });
-        var inboxIds = new HashSet<string>(choices.Where(c=>c.Pending).Select(c=>c.MessageId));
-        // Keep the last answered conversation for each task available even when its final reply cleared the badge.
-        var seen=new HashSet<string>();
-        for (int i=periodEntries.Count-1;i>=0;i--) {
-            var last=periodEntries[i];
-            if (last.TaskId==GlobalChat || inboxIds.Contains(last.MessageId) || !seen.Add(last.TaskId)) continue;
-            string title; titleById.TryGetValue(last.TaskId,out title);
-            choices.Add(new ConversationChoice { MessageId=last.MessageId, TaskId=last.TaskId,
-                Label=(title ?? "Earlier reminder") + "   ·   " + last.AtUtc.ToLocalTime().ToString("g") + "   ·   Replied" });
-        }
-        bool changed=choices.Count!=eventList.Items.Count || choices.Where((choice,i)=>{
-            var old=(ConversationChoice)eventList.Items[i];
-            return choice.MessageId!=old.MessageId || choice.TaskId!=old.TaskId || choice.Pending!=old.Pending || choice.Label!=old.Label;
-        }).Any();
-        if (changed) {
-            rebuilding=true; eventList.BeginUpdate();
-            try {
-            eventList.Items.Clear(); eventList.Items.AddRange(choices.ToArray());
-            } finally { eventList.EndUpdate(); rebuilding=false; }
-        }
-        inboxRevision=version;
-    }
-
     void RenderNotice() {
         if (rebuilding || finish==null || notice.IsDisposed || notice.Disposing || (!notice.Visible && !openingInbox)) return;
         WithPanelDpi(RenderConversation,true);
@@ -1312,8 +1268,7 @@ class ReminderDot : Form {
             a.MessageId==b.MessageId && a.TaskId==b.TaskId && a.Text==b.Text;
     }
     List<ChatEntry> HistoryPage(ConversationChoice current) {
-        var entries=current!=null && current.TaskId!=GlobalChat
-            ? periodEntries.Where(e=>e.TaskId==current.TaskId).ToList() : periodEntries;
+        var entries=periodEntries;
         pageCount=Math.Max(1,(entries.Count+HistoryPageSize-1)/HistoryPageSize);
         if (locateMessage!=null) {
             int at=entries.FindLastIndex(e=>e.MessageId==locateMessage);
@@ -1357,7 +1312,7 @@ class ReminderDot : Form {
             finish.Text = task != null && task.Submission ? "Mark submitted" : "Done"; finish.AccessibleName = finish.Text;
         }
         finish.Enabled = canReply; acknowledge.Enabled = canReply; snoozeReply.Enabled = canReply;
-        replyBox.Enabled = canType; sendReply.Enabled = canType; eventList.Enabled = !replying && current != null;
+        replyBox.Enabled = canType; sendReply.Enabled = canType;
         messageStatus.Text = current == null ? "No reminder messages yet" :
             current.Pending ? (replying ? "Reading your reply…" : "Waiting for your reply") :
             current.TaskId == GlobalChat ? "Your desktop companion" : "Replied";

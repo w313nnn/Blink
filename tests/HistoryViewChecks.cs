@@ -50,14 +50,14 @@ class HistoryViewChecks {
         using(var pet=new ReminderDot(folder)) {
             pet.Show(); Call(pet,"OpenInbox",new object[]{null});
             var store=Field<TaskStore>(pet,"store");
-            var selector=Field<ComboBox>(pet,"eventList");
+            var caption=Field<Label>(pet,"conversationCaption");
             var reply=Field<TextBox>(pet,"replyBox");
             var notice=Field<Form>(pet,"notice");
             var range=Field<Button>(pet,"historyRange");
             var view=Field<Panel>(pet,"messageThread");
             Check(Bubbles(pet).Length==40 && Bubbles(pet).All(s=>s.StartsWith("Current ")) &&
                 Bubbles(pet).Contains("Current 44"),"Current page leaked messages or lost its newest entry");
-            Check(selector.Items.Cast<object>().All(o=>!o.ToString().Contains("Old only")),"Another period leaked into the thread list");
+            Check(!notice.Controls.OfType<ComboBox>().Any(),"Reminder history must not create list choices");
             Check(!Field<Button>(pet,"nextPeriod").Enabled,"Next period should stop at the current interval");
             Click(pet,"olderMessages");
             Check(Bubbles(pet).Length==5 && Bubbles(pet).Contains("Current 0"),"Inclusive start or the older page is wrong");
@@ -78,14 +78,14 @@ class HistoryViewChecks {
             Call(pet,"OpenInbox","unanswered");
             Check(Bubbles(pet).Contains("Original reminder") && store.Inbox.Count==1,
                 "Addressing an unread reminder should open its older page without answering it");
-            selector.SelectedItem=selector.Items.Cast<object>().First(o=>o.ToString()=="All messages");
+            
             Call(pet,"ShowUpcoming");
             Check(range.Text==liveRange && store.Inbox.Count==1 && Bubbles(pet).Contains("Show my upcoming reminders"),
                 "A new chat must appear in the current period and leave unrelated reminders unanswered");
             store.CommitChat("unanswered","lab","Change when you remind me","What time today?",null,
                 new ChatPrompt {Context="What time today?",SelectedTaskId="lab"});
             Call(pet,"SyncInbox","unanswered");
-            Check(selector.SelectedItem.ToString().Contains("Awaiting reply") && Field<Button>(pet,"finish").Visible &&
+            Check(caption.Text.StartsWith("Reply to ") && Field<Button>(pet,"finish").Visible &&
                 !Bubbles(pet).Contains("Original reminder") && Bubbles(pet).Contains("What time today?"),
                 "A reminder continued across periods lost its pending state or leaked old messages");
             var liveProfile=Field<PetProfile>(pet,"profile");

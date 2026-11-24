@@ -68,7 +68,7 @@ class ConversationViewChecks {
         using (var dot=new ReminderDot(folder)) {
             dot.Show(); Invoke(dot,"OpenInbox",new object[]{null});
             var view=Field<Panel>(dot,"messageThread");
-            var selector=Field<ComboBox>(dot,"eventList");
+
             var reply=Field<TextBox>(dot,"replyBox");
             var close=Field<Button>(dot,"closeChat");
             CheckBubbles(view);
@@ -83,14 +83,9 @@ class ConversationViewChecks {
             int top=anchor.Top;
             reply.Text="My draft"; Invoke(dot,"ShowUpcoming");
             Check(!anchor.IsDisposed && Math.Abs(anchor.Top-top)<=2,"New messages moved "+anchor.Text+" from "+top+" to "+anchor.Top);
-            selector.SelectedIndex=1;
-            Check(reply.TextLength==0,"Draft appeared in a different conversation");
-            reply.Text="Notes draft"; selector.SelectedIndex=0;
-            Check(reply.Text=="My draft","Changing threads discarded the draft");
+            Check(reply.Text=="My draft","Refreshing messages discarded the draft");
             close.PerformClick(); Invoke(dot,"OpenInbox",new object[]{null});
             Check(reply.Text=="My draft","Reopening discarded the draft");
-            selector.SelectedIndex=1;
-            Check(reply.Text=="Notes draft","Second conversation lost its own draft");
             dot.Close();
         }
         Console.WriteLine("Bubble sizing, alignment, wrapping, scroll anchors and per-thread drafts passed");
